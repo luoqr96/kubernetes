@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -24,17 +25,18 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-07-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
-	"github.com/Azure/go-autorest/autorest/to"
 
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/util/flowcontrol"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	azclients "k8s.io/legacy-cloud-providers/azure/clients"
 	"k8s.io/legacy-cloud-providers/azure/clients/armclient"
 	"k8s.io/legacy-cloud-providers/azure/metrics"
 	"k8s.io/legacy-cloud-providers/azure/retry"
+	"k8s.io/utils/pointer"
 )
 
 var _ Interface = &Client{}
@@ -56,8 +58,8 @@ type Client struct {
 // New creates a new vmssVM client with ratelimiting.
 func New(config *azclients.ClientConfig) *Client {
 	baseURI := config.ResourceManagerEndpoint
-	authorizer := autorest.NewBearerAuthorizer(config.ServicePrincipalToken)
-	armClient := armclient.New(authorizer, baseURI, "", APIVersion, config.Location, config.Backoff)
+	authorizer := config.Authorizer
+	armClient := armclient.New(authorizer, baseURI, config.UserAgent, APIVersion, config.Location, config.Backoff)
 	rateLimiterReader, rateLimiterWriter := azclients.NewRateLimiter(config.RateLimitConfig)
 
 	klog.V(2).Infof("Azure vmssVM client (read ops) using rate limit config: QPS=%g, bucket=%d",
@@ -197,8 +199,14 @@ func (c *Client) listVMSSVM(ctx context.Context, resourceGroupName string, virtu
 		return result, retry.GetError(resp, err)
 	}
 
-	for page.NotDone() {
-		result = append(result, *page.Response().Value...)
+	for {
+		result = append(result, page.Values()...)
+
+		// Abort the loop when there's no nextLink in the response.
+		if pointer.StringDeref(page.Response().NextLink, "") == "" {
+			break
+		}
+
 		if err = page.NextWithContext(ctx); err != nil {
 			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.list.next", resourceID, err)
 			return result, retry.GetError(page.Response().Response.Response, err)
@@ -291,12 +299,12 @@ func (c *Client) listResponder(resp *http.Response) (result compute.VirtualMachi
 // virtualMachineScaleSetListResultPreparer prepares a request to retrieve the next set of results.
 // It returns nil if no more results exist.
 func (c *Client) virtualMachineScaleSetVMListResultPreparer(ctx context.Context, vmssvmlr compute.VirtualMachineScaleSetVMListResult) (*http.Request, error) {
-	if vmssvmlr.NextLink == nil || len(to.String(vmssvmlr.NextLink)) < 1 {
+	if vmssvmlr.NextLink == nil || len(pointer.StringDeref(vmssvmlr.NextLink, "")) < 1 {
 		return nil, nil
 	}
 
 	decorators := []autorest.PrepareDecorator{
-		autorest.WithBaseURL(to.String(vmssvmlr.NextLink)),
+		autorest.WithBaseURL(pointer.StringDeref(vmssvmlr.NextLink, "")),
 	}
 	return c.armClient.PrepareGetRequest(ctx, decorators...)
 }
@@ -366,4 +374,90 @@ func (page VirtualMachineScaleSetVMListResultPage) Values() []compute.VirtualMac
 		return nil
 	}
 	return *page.vmssvlr.Value
+}
+
+// UpdateVMs updates a list of VirtualMachineScaleSetVM from map[instanceID]compute.VirtualMachineScaleSetVM.
+func (c *Client) UpdateVMs(ctx context.Context, resourceGroupName string, VMScaleSetName string, instances map[string]compute.VirtualMachineScaleSetVM, source string) *retry.Error {
+	mc := metrics.NewMetricContext("vmssvm", "update_vms", resourceGroupName, c.subscriptionID, source)
+
+	// Report errors if the client is rate limited.
+	if !c.rateLimiterWriter.TryAccept() {
+		mc.RateLimitedCount()
+		return retry.GetRateLimitError(true, "VMSSVMUpdateVMs")
+	}
+
+	// Report errors if the client is throttled.
+	if c.RetryAfterWriter.After(time.Now()) {
+		mc.ThrottledCount()
+		rerr := retry.GetThrottlingError("VMSSVMUpdateVMs", "client throttled", c.RetryAfterWriter)
+		return rerr
+	}
+
+	rerr := c.updateVMSSVMs(ctx, resourceGroupName, VMScaleSetName, instances)
+	mc.Observe(rerr.Error())
+	if rerr != nil {
+		if rerr.IsThrottled() {
+			// Update RetryAfterReader so that no more requests would be sent until RetryAfter expires.
+			c.RetryAfterWriter = rerr.RetryAfter
+		}
+
+		return rerr
+	}
+
+	return nil
+}
+
+// updateVMSSVMs updates a list of VirtualMachineScaleSetVM from map[instanceID]compute.VirtualMachineScaleSetVM.
+func (c *Client) updateVMSSVMs(ctx context.Context, resourceGroupName string, VMScaleSetName string, instances map[string]compute.VirtualMachineScaleSetVM) *retry.Error {
+	resources := make(map[string]interface{})
+	for instanceID, parameter := range instances {
+		resourceID := armclient.GetChildResourceID(
+			c.subscriptionID,
+			resourceGroupName,
+			"Microsoft.Compute/virtualMachineScaleSets",
+			VMScaleSetName,
+			"virtualMachines",
+			instanceID,
+		)
+		resources[resourceID] = parameter
+	}
+
+	responses := c.armClient.PutResources(ctx, resources)
+	errors := make([]*retry.Error, 0)
+	for resourceID, resp := range responses {
+		if resp == nil {
+			continue
+		}
+
+		defer c.armClient.CloseResponse(ctx, resp.Response)
+		if resp.Error != nil {
+			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.put.request", resourceID, resp.Error.Error())
+			errors = append(errors, resp.Error)
+			continue
+		}
+
+		if resp.Response != nil && resp.Response.StatusCode != http.StatusNoContent {
+			_, rerr := c.updateResponder(resp.Response)
+			if rerr != nil {
+				klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.put.respond", resourceID, rerr.Error())
+				errors = append(errors, rerr)
+			}
+		}
+	}
+
+	// Aggregate errors.
+	if len(errors) > 0 {
+		rerr := &retry.Error{}
+		errs := make([]error, 0)
+		for _, err := range errors {
+			if err.IsThrottled() && err.RetryAfter.After(err.RetryAfter) {
+				rerr.RetryAfter = err.RetryAfter
+			}
+			errs = append(errs, err.Error())
+		}
+		rerr.RawError = utilerrors.Flatten(utilerrors.NewAggregate(errs))
+		return rerr
+	}
+
+	return nil
 }

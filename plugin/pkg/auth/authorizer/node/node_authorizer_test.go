@@ -20,48 +20,23 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"runtime/pprof"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"os"
-
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy"
 )
-
-var (
-	trEnabledFeature           = featuregate.NewFeatureGate()
-	trDisabledFeature          = featuregate.NewFeatureGate()
-	csiNodeInfoEnabledFeature  = featuregate.NewFeatureGate()
-	csiNodeInfoDisabledFeature = featuregate.NewFeatureGate()
-)
-
-func init() {
-	if err := trEnabledFeature.Add(map[featuregate.Feature]featuregate.FeatureSpec{features.TokenRequest: {Default: true}}); err != nil {
-		panic(err)
-	}
-	if err := trDisabledFeature.Add(map[featuregate.Feature]featuregate.FeatureSpec{features.TokenRequest: {Default: false}}); err != nil {
-		panic(err)
-	}
-	if err := csiNodeInfoEnabledFeature.Add(map[featuregate.Feature]featuregate.FeatureSpec{features.CSINodeInfo: {Default: true}}); err != nil {
-		panic(err)
-	}
-	if err := csiNodeInfoDisabledFeature.Add(map[featuregate.Feature]featuregate.FeatureSpec{features.CSINodeInfo: {Default: false}}); err != nil {
-		panic(err)
-	}
-}
 
 func TestAuthorizer(t *testing.T) {
 	g := NewGraph()
@@ -82,7 +57,7 @@ func TestAuthorizer(t *testing.T) {
 	populate(g, nodes, pods, pvs, attachments)
 
 	identifier := nodeidentifier.NewDefaultNodeIdentifier()
-	authz := NewAuthorizer(g, identifier, bootstrappolicy.NodeRules()).(*NodeAuthorizer)
+	authz := NewAuthorizer(g, identifier, bootstrappolicy.NodeRules())
 
 	node0 := &user.DefaultInfo{Name: "system:node:node0", Groups: []string{"system:nodes"}}
 
@@ -92,11 +67,6 @@ func TestAuthorizer(t *testing.T) {
 		expect   authorizer.Decision
 		features featuregate.FeatureGate
 	}{
-		{
-			name:   "allowed node configmap",
-			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "node0-configmap", Namespace: "ns0"},
-			expect: authorizer.DecisionAllow,
-		},
 		{
 			name:   "allowed configmap",
 			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "configmap0-pod0-node0", Namespace: "ns0"},
@@ -152,12 +122,6 @@ func TestAuthorizer(t *testing.T) {
 			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "persistentvolumes", Name: "pv0-pod0-node0-ns0", Namespace: ""},
 			expect: authorizer.DecisionAllow,
 		},
-
-		{
-			name:   "disallowed node configmap",
-			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "node1-configmap", Namespace: "ns0"},
-			expect: authorizer.DecisionNoOpinion,
-		},
 		{
 			name:   "disallowed configmap",
 			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "configmap0-pod0-node1", Namespace: "ns0"},
@@ -189,34 +153,24 @@ func TestAuthorizer(t *testing.T) {
 			expect: authorizer.DecisionAllow,
 		},
 		{
-			name:     "allowed svcacct token create - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node0", Namespace: "ns0"},
-			features: trEnabledFeature,
-			expect:   authorizer.DecisionAllow,
+			name:   "allowed svcacct token create",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node0", Namespace: "ns0"},
+			expect: authorizer.DecisionAllow,
 		},
 		{
-			name:     "disallowed svcacct token create - serviceaccount not attached to node",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node1", Namespace: "ns0"},
-			features: trEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed svcacct token create - serviceaccount not attached to node",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node1", Namespace: "ns0"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed svcacct token create - feature disabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node0", Namespace: "ns0"},
-			features: trDisabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed svcacct token create - no subresource",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Name: "svcacct0-node0", Namespace: "ns0"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed svcacct token create - no subresource",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "serviceaccounts", Name: "svcacct0-node0", Namespace: "ns0"},
-			features: trEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
-		},
-		{
-			name:     "disallowed svcacct token create - non create",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "update", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node0", Namespace: "ns0"},
-			features: trEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed svcacct token create - non create",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "update", Resource: "serviceaccounts", Subresource: "token", Name: "svcacct0-node0", Namespace: "ns0"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
 			name:   "disallowed get lease in namespace other than kube-node-lease - feature enabled",
@@ -300,82 +254,64 @@ func TestAuthorizer(t *testing.T) {
 		},
 		// CSINode
 		{
-			name:     "disallowed CSINode - feature disabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoDisabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed CSINode with subresource - feature enabled",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", Subresource: "csiDrivers", APIGroup: "storage.k8s.io", Name: "node0"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed CSINode with subresource - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", Subresource: "csiDrivers", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed get another node's CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed get another node's CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed update another node's CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "update", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed update another node's CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "update", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed patch another node's CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "patch", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed patch another node's CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "patch", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed delete another node's CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "delete", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed delete another node's CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "delete", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node1"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed list CSINodes",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "list", Resource: "csinodes", APIGroup: "storage.k8s.io"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed list CSINodes - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "list", Resource: "csinodes", APIGroup: "storage.k8s.io"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "disallowed watch CSINodes",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "watch", Resource: "csinodes", APIGroup: "storage.k8s.io"},
+			expect: authorizer.DecisionNoOpinion,
 		},
 		{
-			name:     "disallowed watch CSINodes - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "watch", Resource: "csinodes", APIGroup: "storage.k8s.io"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionNoOpinion,
+			name:   "allowed get CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
+			expect: authorizer.DecisionAllow,
 		},
 		{
-			name:     "allowed get CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionAllow,
+			name:   "allowed create CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
+			expect: authorizer.DecisionAllow,
 		},
 		{
-			name:     "allowed create CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "create", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionAllow,
+			name:   "allowed update CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "update", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
+			expect: authorizer.DecisionAllow,
 		},
 		{
-			name:     "allowed update CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "update", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionAllow,
+			name:   "allowed patch CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "patch", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
+			expect: authorizer.DecisionAllow,
 		},
 		{
-			name:     "allowed patch CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "patch", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionAllow,
-		},
-		{
-			name:     "allowed delete CSINode - feature enabled",
-			attrs:    authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "delete", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
-			features: csiNodeInfoEnabledFeature,
-			expect:   authorizer.DecisionAllow,
+			name:   "allowed delete CSINode",
+			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "delete", Resource: "csinodes", APIGroup: "storage.k8s.io", Name: "node0"},
+			expect: authorizer.DecisionAllow,
 		},
 	}
 
@@ -437,36 +373,23 @@ func TestAuthorizerSharedResources(t *testing.T) {
 	}
 	g.AddPod(pod3)
 
-	g.SetNodeConfigMap("node1", "shared-configmap", "ns1")
-	g.SetNodeConfigMap("node2", "shared-configmap", "ns1")
-	g.SetNodeConfigMap("node3", "configmap", "ns1")
-
 	testcases := []struct {
-		User          user.Info
-		Secret        string
-		ConfigMap     string
-		ExpectAllowed bool
+		User      user.Info
+		Secret    string
+		ConfigMap string
+		Decision  authorizer.Decision
 	}{
-		{User: node1, ExpectAllowed: true, Secret: "node1-only"},
-		{User: node1, ExpectAllowed: true, Secret: "node1-node2-only"},
-		{User: node1, ExpectAllowed: true, Secret: "shared-all"},
+		{User: node1, Decision: authorizer.DecisionAllow, Secret: "node1-only"},
+		{User: node1, Decision: authorizer.DecisionAllow, Secret: "node1-node2-only"},
+		{User: node1, Decision: authorizer.DecisionAllow, Secret: "shared-all"},
 
-		{User: node2, ExpectAllowed: false, Secret: "node1-only"},
-		{User: node2, ExpectAllowed: true, Secret: "node1-node2-only"},
-		{User: node2, ExpectAllowed: true, Secret: "shared-all"},
+		{User: node2, Decision: authorizer.DecisionNoOpinion, Secret: "node1-only"},
+		{User: node2, Decision: authorizer.DecisionAllow, Secret: "node1-node2-only"},
+		{User: node2, Decision: authorizer.DecisionAllow, Secret: "shared-all"},
 
-		{User: node3, ExpectAllowed: false, Secret: "node1-only"},
-		{User: node3, ExpectAllowed: false, Secret: "node1-node2-only"},
-		{User: node3, ExpectAllowed: true, Secret: "shared-all"},
-
-		{User: node1, ExpectAllowed: true, ConfigMap: "shared-configmap"},
-		{User: node1, ExpectAllowed: false, ConfigMap: "configmap"},
-
-		{User: node2, ExpectAllowed: true, ConfigMap: "shared-configmap"},
-		{User: node2, ExpectAllowed: false, ConfigMap: "configmap"},
-
-		{User: node3, ExpectAllowed: false, ConfigMap: "shared-configmap"},
-		{User: node3, ExpectAllowed: true, ConfigMap: "configmap"},
+		{User: node3, Decision: authorizer.DecisionNoOpinion, Secret: "node1-only"},
+		{User: node3, Decision: authorizer.DecisionNoOpinion, Secret: "node1-node2-only"},
+		{User: node3, Decision: authorizer.DecisionAllow, Secret: "shared-all"},
 	}
 
 	for i, tc := range testcases {
@@ -491,8 +414,8 @@ func TestAuthorizerSharedResources(t *testing.T) {
 			t.Fatalf("test case must include a request for a Secret or ConfigMap")
 		}
 
-		if (decision == authorizer.DecisionAllow) != tc.ExpectAllowed {
-			t.Errorf("%d: expected %v, got %v", i, tc.ExpectAllowed, decision)
+		if decision != tc.Decision {
+			t.Errorf("%d: expected %v, got %v", i, tc.Decision, decision)
 		}
 	}
 
@@ -671,7 +594,7 @@ func BenchmarkAuthorization(b *testing.B) {
 	populate(g, nodes, pods, pvs, attachments)
 
 	identifier := nodeidentifier.NewDefaultNodeIdentifier()
-	authz := NewAuthorizer(g, identifier, bootstrappolicy.NodeRules()).(*NodeAuthorizer)
+	authz := NewAuthorizer(g, identifier, bootstrappolicy.NodeRules())
 
 	node0 := &user.DefaultInfo{Name: "system:node:node0", Groups: []string{"system:nodes"}}
 
@@ -681,11 +604,6 @@ func BenchmarkAuthorization(b *testing.B) {
 		expect   authorizer.Decision
 		features featuregate.FeatureGate
 	}{
-		{
-			name:   "allowed node configmap",
-			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "node0-configmap", Namespace: "ns0"},
-			expect: authorizer.DecisionAllow,
-		},
 		{
 			name:   "allowed configmap",
 			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "configmap0-pod0-node0", Namespace: "ns0"},
@@ -700,12 +618,6 @@ func BenchmarkAuthorization(b *testing.B) {
 			name:   "allowed shared secret via pod",
 			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "secrets", Name: "secret0-shared", Namespace: "ns0"},
 			expect: authorizer.DecisionAllow,
-		},
-
-		{
-			name:   "disallowed node configmap",
-			attrs:  authorizer.AttributesRecord{User: node0, ResourceRequest: true, Verb: "get", Resource: "configmaps", Name: "node1-configmap", Namespace: "ns0"},
-			expect: authorizer.DecisionNoOpinion,
 		},
 		{
 			name:   "disallowed configmap",
@@ -831,9 +743,6 @@ func BenchmarkAuthorization(b *testing.B) {
 func populate(graph *Graph, nodes []*corev1.Node, pods []*corev1.Pod, pvs []*corev1.PersistentVolume, attachments []*storagev1.VolumeAttachment) {
 	p := &graphPopulator{}
 	p.graph = graph
-	for _, node := range nodes {
-		p.addNode(node)
-	}
 	for _, pod := range pods {
 		p.addPod(pod)
 	}
@@ -882,19 +791,9 @@ func generate(opts *sampleDataOpts) ([]*corev1.Node, []*corev1.Pod, []*corev1.Pe
 			attachments = append(attachments, attachment)
 		}
 
-		name := fmt.Sprintf("%s-configmap", nodeName)
 		nodes = append(nodes, &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: nodeName},
-			Spec: corev1.NodeSpec{
-				ConfigSource: &corev1.NodeConfigSource{
-					ConfigMap: &corev1.ConfigMapNodeConfigSource{
-						Name:             name,
-						Namespace:        "ns0",
-						UID:              types.UID(fmt.Sprintf("ns0-%s", name)),
-						KubeletConfigKey: "kubelet",
-					},
-				},
-			},
+			Spec:       corev1.NodeSpec{},
 		})
 	}
 	return nodes, pods, pvs, attachments

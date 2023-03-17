@@ -16,9 +16,12 @@ Repositories currently staged here:
 - [`k8s.io/cluster-bootstrap`](https://github.com/kubernetes/cluster-bootstrap)
 - [`k8s.io/code-generator`](https://github.com/kubernetes/code-generator)
 - [`k8s.io/component-base`](https://github.com/kubernetes/component-base)
+- [`k8s.io/component-helpers`](https://github.com/kubernetes/component-helpers)
+- [`k8s.io/controller-manager`](https://github.com/kubernetes/controller-manager)
 - [`k8s.io/cri-api`](https://github.com/kubernetes/cri-api)
-- [`k8s.io/csi-api`](https://github.com/kubernetes/csi-api)
 - [`k8s.io/csi-translation-lib`](https://github.com/kubernetes/csi-translation-lib)
+- [`k8s.io/dynamic-resource-allocation`](https://github.com/kubernetes/dynamic-resource-allocation)
+- [`k8s.io/kms`](https://github.com/kubernetes/kms)
 - [`k8s.io/kube-aggregator`](https://github.com/kubernetes/kube-aggregator)
 - [`k8s.io/kube-controller-manager`](https://github.com/kubernetes/kube-controller-manager)
 - [`k8s.io/kube-proxy`](https://github.com/kubernetes/kube-proxy)
@@ -27,7 +30,9 @@ Repositories currently staged here:
 - [`k8s.io/kubelet`](https://github.com/kubernetes/kubelet)
 - [`k8s.io/legacy-cloud-providers`](https://github.com/kubernetes/legacy-cloud-providers)
 - [`k8s.io/metrics`](https://github.com/kubernetes/metrics)
-- [`k8s.io/node-api`](https://github.com/kubernetes/node-api)
+- [`k8s.io/mount-utils`](https://github.com/kubernetes/mount-utils)
+- [`k8s.io/noderesourcetopology-api`](https://github.com/kubernetes/noderesourcetopology-api)
+- [`k8s.io/pod-security-admission`](https://github.com/kubernetes/pod-security-admission)
 - [`k8s.io/sample-apiserver`](https://github.com/kubernetes/sample-apiserver)
 - [`k8s.io/sample-cli-plugin`](https://github.com/kubernetes/sample-cli-plugin)
 - [`k8s.io/sample-controller`](https://github.com/kubernetes/sample-controller)
@@ -77,6 +82,13 @@ https://github.com/kubernetes/kubernetes-template-project.
 6. Make sure that the `.github/PULL_REQUEST_TEMPLATE.md` and
 `CONTRIBUTING.md` files mention that PRs are not directly accepted to the repo.
 
+7. Ensure that `docs.go` file is added. Refer to [#kubernetes/kubernetes#91354](https://github.com/kubernetes/kubernetes/blob/release-1.24/staging/src/k8s.io/client-go/doc.go) for reference.
+
+8. NOTE: Do not edit go.mod or go.sum in the new repo (staging/src/k8s.io/<newrepo>/) manually. Run the following instead:
+
+```
+  ./hack/update-vendor.sh
+```
 ### Creating the published repository
 
 1. Create an [issue](https://github.com/kubernetes/org/issues/new?template=repo-create.md)
@@ -98,7 +110,7 @@ update the publishing-bot to publish the staging repository by updating:
     - [`rules.yaml`](/staging/publishing/rules.yaml):
     Make sure that the list of dependencies reflects the staging repos in the `Godeps.json` file.
 
-    - [`fetch-all-latest-and-push.sh`](https://github.com/kubernetes/publishing-bot/blob/master/hack/fetch-all-latest-and-push.sh):
+    - [`repos.sh`](https://github.com/kubernetes/publishing-bot/blob/master/hack/repos.sh):
     Add the staging repo in the list of repos to be published.
 
 4. Add the staging and published repositories as a subproject for the

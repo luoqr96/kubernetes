@@ -22,26 +22,27 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	pluginhelper "k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	"k8s.io/kubernetes/pkg/scheduler/nodeinfo"
+	v1helper "k8s.io/component-helpers/scheduling/corev1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 )
 
 // TaintToleration is a plugin that checks if a pod tolerates a node's taints.
 type TaintToleration struct {
-	handle framework.FrameworkHandle
+	handle framework.Handle
 }
 
 var _ framework.FilterPlugin = &TaintToleration{}
-var _ framework.PostFilterPlugin = &TaintToleration{}
+var _ framework.PreScorePlugin = &TaintToleration{}
 var _ framework.ScorePlugin = &TaintToleration{}
+var _ framework.EnqueueExtensions = &TaintToleration{}
 
 const (
 	// Name is the name of the plugin used in the plugin registry and configurations.
-	Name = "TaintToleration"
-	// postFilterStateKey is the key in CycleState to TaintToleration pre-computed data for Scoring.
-	postFilterStateKey = "PostFilter" + Name
+	Name = names.TaintToleration
+	// preScoreStateKey is the key in CycleState to TaintToleration pre-computed data for Scoring.
+	preScoreStateKey = "PreScore" + Name
 	// ErrReasonNotMatch is the Filter reason status when not matching.
 	ErrReasonNotMatch = "node(s) had taints that the pod didn't tolerate"
 )
@@ -51,35 +52,38 @@ func (pl *TaintToleration) Name() string {
 	return Name
 }
 
+// EventsToRegister returns the possible events that may make a Pod
+// failed by this plugin schedulable.
+func (pl *TaintToleration) EventsToRegister() []framework.ClusterEvent {
+	return []framework.ClusterEvent{
+		{Resource: framework.Node, ActionType: framework.Add | framework.Update},
+	}
+}
+
 // Filter invoked at the filter extension point.
-func (pl *TaintToleration) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeInfo *nodeinfo.NodeInfo) *framework.Status {
-	if nodeInfo == nil || nodeInfo.Node() == nil {
-		return framework.NewStatus(framework.Error, "invalid nodeInfo")
+func (pl *TaintToleration) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
+	node := nodeInfo.Node()
+	if node == nil {
+		return framework.AsStatus(fmt.Errorf("invalid nodeInfo"))
 	}
 
-	taints, err := nodeInfo.Taints()
-	if err != nil {
-		return framework.NewStatus(framework.Error, err.Error())
-	}
-
-	if v1helper.TolerationsTolerateTaintsWithFilter(pod.Spec.Tolerations, taints, func(t *v1.Taint) bool {
-		// PodToleratesNodeTaints is only interested in NoSchedule and NoExecute taints.
-		return t.Effect == v1.TaintEffectNoSchedule || t.Effect == v1.TaintEffectNoExecute
-	}) {
+	taint, isUntolerated := v1helper.FindMatchingUntoleratedTaint(node.Spec.Taints, pod.Spec.Tolerations, helper.DoNotScheduleTaintsFilterFunc())
+	if !isUntolerated {
 		return nil
 	}
 
-	return framework.NewStatus(framework.UnschedulableAndUnresolvable, ErrReasonNotMatch)
+	errReason := fmt.Sprintf("node(s) had untolerated taint {%s: %s}", taint.Key, taint.Value)
+	return framework.NewStatus(framework.UnschedulableAndUnresolvable, errReason)
 }
 
-// postFilterState computed at PostFilter and used at Score.
-type postFilterState struct {
+// preScoreState computed at PreScore and used at Score.
+type preScoreState struct {
 	tolerationsPreferNoSchedule []v1.Toleration
 }
 
 // Clone implements the mandatory Clone interface. We don't really copy the data since
 // there is no need for that.
-func (s *postFilterState) Clone() framework.StateData {
+func (s *preScoreState) Clone() framework.StateData {
 	return s
 }
 
@@ -94,28 +98,28 @@ func getAllTolerationPreferNoSchedule(tolerations []v1.Toleration) (tolerationLi
 	return
 }
 
-// PostFilter builds and writes cycle state used by Score and NormalizeScore.
-func (pl *TaintToleration) PostFilter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodes []*v1.Node, _ framework.NodeToStatusMap) *framework.Status {
+// PreScore builds and writes cycle state used by Score and NormalizeScore.
+func (pl *TaintToleration) PreScore(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodes []*v1.Node) *framework.Status {
 	if len(nodes) == 0 {
 		return nil
 	}
 	tolerationsPreferNoSchedule := getAllTolerationPreferNoSchedule(pod.Spec.Tolerations)
-	state := &postFilterState{
+	state := &preScoreState{
 		tolerationsPreferNoSchedule: tolerationsPreferNoSchedule,
 	}
-	cycleState.Write(postFilterStateKey, state)
+	cycleState.Write(preScoreStateKey, state)
 	return nil
 }
 
-func getPostFilterState(cycleState *framework.CycleState) (*postFilterState, error) {
-	c, err := cycleState.Read(postFilterStateKey)
+func getPreScoreState(cycleState *framework.CycleState) (*preScoreState, error) {
+	c, err := cycleState.Read(preScoreStateKey)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading %q from cycleState: %v", postFilterStateKey, err)
+		return nil, fmt.Errorf("failed to read %q from cycleState: %w", preScoreStateKey, err)
 	}
 
-	s, ok := c.(*postFilterState)
+	s, ok := c.(*preScoreState)
 	if !ok {
-		return nil, fmt.Errorf("%+v convert to tainttoleration.postFilterState error", c)
+		return nil, fmt.Errorf("%+v convert to tainttoleration.preScoreState error", c)
 	}
 	return s, nil
 }
@@ -138,14 +142,14 @@ func countIntolerableTaintsPreferNoSchedule(taints []v1.Taint, tolerations []v1.
 // Score invoked at the Score extension point.
 func (pl *TaintToleration) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
 	nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
-	if err != nil || nodeInfo.Node() == nil {
-		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v", nodeName, err))
+	if err != nil {
+		return 0, framework.AsStatus(fmt.Errorf("getting node %q from Snapshot: %w", nodeName, err))
 	}
 	node := nodeInfo.Node()
 
-	s, err := getPostFilterState(state)
+	s, err := getPreScoreState(state)
 	if err != nil {
-		return 0, framework.NewStatus(framework.Error, err.Error())
+		return 0, framework.AsStatus(err)
 	}
 
 	score := int64(countIntolerableTaintsPreferNoSchedule(node.Spec.Taints, s.tolerationsPreferNoSchedule))
@@ -154,7 +158,7 @@ func (pl *TaintToleration) Score(ctx context.Context, state *framework.CycleStat
 
 // NormalizeScore invoked after scoring all nodes.
 func (pl *TaintToleration) NormalizeScore(ctx context.Context, _ *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
-	return pluginhelper.DefaultNormalizeScore(framework.MaxNodeScore, true, scores)
+	return helper.DefaultNormalizeScore(framework.MaxNodeScore, true, scores)
 }
 
 // ScoreExtensions of the Score plugin.
@@ -163,6 +167,6 @@ func (pl *TaintToleration) ScoreExtensions() framework.ScoreExtensions {
 }
 
 // New initializes a new plugin and returns it.
-func New(_ *runtime.Unknown, h framework.FrameworkHandle) (framework.Plugin, error) {
+func New(_ runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	return &TaintToleration{handle: h}, nil
 }

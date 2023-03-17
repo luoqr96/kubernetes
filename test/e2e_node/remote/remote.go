@@ -19,7 +19,7 @@ package remote
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +28,7 @@ import (
 	"time"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var testTimeout = flag.Duration("test-timeout", 45*time.Minute, "How long (in golang duration format) to wait for ginkgo tests to complete.")
@@ -36,19 +36,55 @@ var resultsDir = flag.String("results-dir", "/tmp/", "Directory to scp test resu
 
 const archiveName = "e2e_node_test.tar.gz"
 
+func copyKubeletConfigIfExists(kubeletConfigFile, dstDir string) error {
+	srcStat, err := os.Stat(kubeletConfigFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		} else {
+			return err
+		}
+	}
+
+	if !srcStat.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", kubeletConfigFile)
+	}
+
+	source, err := os.Open(kubeletConfigFile)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	dst := filepath.Join(dstDir, "kubeletconfig.yaml")
+	destination, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+
+	_, err = io.Copy(destination, source)
+	return err
+}
+
 // CreateTestArchive creates the archive package for the node e2e test.
-func CreateTestArchive(suite TestSuite, systemSpecName string) (string, error) {
+func CreateTestArchive(suite TestSuite, systemSpecName, kubeletConfigFile string) (string, error) {
 	klog.V(2).Infof("Building archive...")
-	tardir, err := ioutil.TempDir("", "node-e2e-archive")
+	tardir, err := os.MkdirTemp("", "node-e2e-archive")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temporary directory %v", err)
 	}
 	defer os.RemoveAll(tardir)
 
+	err = copyKubeletConfigIfExists(kubeletConfigFile, tardir)
+	if err != nil {
+		return "", fmt.Errorf("failed to copy kubelet config: %w", err)
+	}
+
 	// Call the suite function to setup the test package.
 	err = suite.SetupTestPackage(tardir, systemSpecName)
 	if err != nil {
-		return "", fmt.Errorf("failed to setup test package %q: %v", tardir, err)
+		return "", fmt.Errorf("failed to setup test package %q: %w", tardir, err)
 	}
 
 	// Build the tar
@@ -65,8 +101,7 @@ func CreateTestArchive(suite TestSuite, systemSpecName string) (string, error) {
 }
 
 // RunRemote returns the command output, whether the exit was ok, and any errors
-// TODO(random-liu): junitFilePrefix is not prefix actually, the file name is junit-junitFilePrefix.xml. Change the variable name.
-func RunRemote(suite TestSuite, archive string, host string, cleanup bool, imageDesc, junitFilePrefix string, testArgs string, ginkgoArgs string, systemSpecName string, extraEnvs string) (string, bool, error) {
+func RunRemote(suite TestSuite, archive string, host string, cleanup bool, imageDesc, junitFileName, testArgs, ginkgoArgs, systemSpecName, extraEnvs, runtimeConfig string) (string, bool, error) {
 	// Create the temp staging directory
 	klog.V(2).Infof("Staging test binaries on %q", host)
 	workspace := newWorkspaceDir()
@@ -111,7 +146,7 @@ func RunRemote(suite TestSuite, archive string, host string, cleanup bool, image
 	}
 
 	klog.V(2).Infof("Running test on %q", host)
-	output, err := suite.RunTest(host, workspace, resultDir, imageDesc, junitFilePrefix, testArgs, ginkgoArgs, systemSpecName, extraEnvs, *testTimeout)
+	output, err := suite.RunTest(host, workspace, resultDir, imageDesc, junitFileName, testArgs, ginkgoArgs, systemSpecName, extraEnvs, runtimeConfig, *testTimeout)
 
 	aggErrs := []error{}
 	// Do not log the output here, let the caller deal with the test output.
@@ -161,7 +196,7 @@ func GetTimestampFromWorkspaceDir(dir string) string {
 func getTestArtifacts(host, testDir string) error {
 	logPath := filepath.Join(*resultsDir, host)
 	if err := os.MkdirAll(logPath, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory %q: %v", logPath, err)
+		return fmt.Errorf("failed to create log directory %q: %w", logPath, err)
 	}
 	// Copy logs to artifacts/hostname
 	if _, err := runSSHCommand("scp", "-r", fmt.Sprintf("%s:%s/results/*.log", GetHostnameOrIP(host), testDir), logPath); err != nil {
@@ -215,7 +250,7 @@ func collectSystemLog(host string) {
 func WriteLog(host, filename, content string) error {
 	logPath := filepath.Join(*resultsDir, host)
 	if err := os.MkdirAll(logPath, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory %q: %v", logPath, err)
+		return fmt.Errorf("failed to create log directory %q: %w", logPath, err)
 	}
 	f, err := os.Create(filepath.Join(logPath, filename))
 	if err != nil {

@@ -19,8 +19,13 @@ package customresource
 import (
 	"context"
 
-	"github.com/go-openapi/validate"
+	"k8s.io/kube-openapi/pkg/validation/validate"
 
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
+	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/cel"
+	structurallisttype "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/listtype"
+	schemaobjectmeta "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/objectmeta"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,14 +35,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/features"
 	apiserverstorage "k8s.io/apiserver/pkg/storage"
 	"k8s.io/apiserver/pkg/storage/names"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
-	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
-	schemaobjectmeta "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/objectmeta"
-	apiextensionsfeatures "k8s.io/apiextensions-apiserver/pkg/features"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
 // customResourceStrategy implements behavior for CustomResources.
@@ -45,14 +48,26 @@ type customResourceStrategy struct {
 	runtime.ObjectTyper
 	names.NameGenerator
 
-	namespaceScoped bool
-	validator       customResourceValidator
-	schemas         map[string]*structuralschema.Structural
-	status          *apiextensions.CustomResourceSubresourceStatus
-	scale           *apiextensions.CustomResourceSubresourceScale
+	namespaceScoped   bool
+	validator         customResourceValidator
+	structuralSchemas map[string]*structuralschema.Structural
+	celValidators     map[string]*cel.Validator
+	status            *apiextensions.CustomResourceSubresourceStatus
+	scale             *apiextensions.CustomResourceSubresourceScale
+	kind              schema.GroupVersionKind
 }
 
-func NewStrategy(typer runtime.ObjectTyper, namespaceScoped bool, kind schema.GroupVersionKind, schemaValidator, statusSchemaValidator *validate.SchemaValidator, schemas map[string]*structuralschema.Structural, status *apiextensions.CustomResourceSubresourceStatus, scale *apiextensions.CustomResourceSubresourceScale) customResourceStrategy {
+func NewStrategy(typer runtime.ObjectTyper, namespaceScoped bool, kind schema.GroupVersionKind, schemaValidator, statusSchemaValidator *validate.SchemaValidator, structuralSchemas map[string]*structuralschema.Structural, status *apiextensions.CustomResourceSubresourceStatus, scale *apiextensions.CustomResourceSubresourceScale) customResourceStrategy {
+	celValidators := map[string]*cel.Validator{}
+	if utilfeature.DefaultFeatureGate.Enabled(features.CustomResourceValidationExpressions) {
+		for name, s := range structuralSchemas {
+			v := cel.NewValidator(s, true, cel.PerCallLimit) // CEL programs are compiled and cached here
+			if v != nil {
+				celValidators[name] = v
+			}
+		}
+	}
+
 	return customResourceStrategy{
 		ObjectTyper:     typer,
 		NameGenerator:   names.SimpleNameGenerator,
@@ -65,7 +80,9 @@ func NewStrategy(typer runtime.ObjectTyper, namespaceScoped bool, kind schema.Gr
 			schemaValidator:       schemaValidator,
 			statusSchemaValidator: statusSchemaValidator,
 		},
-		schemas: schemas,
+		structuralSchemas: structuralSchemas,
+		celValidators:     celValidators,
+		kind:              kind,
 	}
 }
 
@@ -73,16 +90,28 @@ func (a customResourceStrategy) NamespaceScoped() bool {
 	return a.namespaceScoped
 }
 
+// GetResetFields returns the set of fields that get reset by the strategy
+// and should not be modified by the user.
+func (a customResourceStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
+	fields := map[fieldpath.APIVersion]*fieldpath.Set{}
+
+	if a.status != nil {
+		fields[fieldpath.APIVersion(a.kind.GroupVersion().String())] = fieldpath.NewSet(
+			fieldpath.MakePathOrDie("status"),
+		)
+	}
+
+	return fields
+}
+
 // PrepareForCreate clears the status of a CustomResource before creation.
 func (a customResourceStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
-	if utilfeature.DefaultFeatureGate.Enabled(apiextensionsfeatures.CustomResourceSubresources) && a.status != nil {
+	if a.status != nil {
 		customResourceObject := obj.(*unstructured.Unstructured)
 		customResource := customResourceObject.UnstructuredContent()
 
 		// create cannot set status
-		if _, ok := customResource["status"]; ok {
-			delete(customResource, "status")
-		}
+		delete(customResource, "status")
 	}
 
 	accessor, _ := meta.Accessor(obj)
@@ -98,7 +127,7 @@ func (a customResourceStrategy) PrepareForUpdate(ctx context.Context, obj, old r
 	oldCustomResource := oldCustomResourceObject.UnstructuredContent()
 
 	// If the /status subresource endpoint is installed, update is not allowed to set status.
-	if utilfeature.DefaultFeatureGate.Enabled(apiextensionsfeatures.CustomResourceSubresources) && a.status != nil {
+	if a.status != nil {
 		_, ok1 := newCustomResource["status"]
 		_, ok2 := oldCustomResource["status"]
 		switch {
@@ -139,10 +168,28 @@ func (a customResourceStrategy) Validate(ctx context.Context, obj runtime.Object
 	// validate embedded resources
 	if u, ok := obj.(*unstructured.Unstructured); ok {
 		v := obj.GetObjectKind().GroupVersionKind().Version
-		errs = append(errs, schemaobjectmeta.Validate(nil, u.Object, a.schemas[v], false)...)
+		errs = append(errs, schemaobjectmeta.Validate(nil, u.Object, a.structuralSchemas[v], false)...)
+
+		// validate x-kubernetes-list-type "map" and "set" invariant
+		errs = append(errs, structurallisttype.ValidateListSetsAndMaps(nil, a.structuralSchemas[v], u.Object)...)
+
+		// validate x-kubernetes-validations rules
+		if celValidator, ok := a.celValidators[v]; ok {
+			if has, err := hasBlockingErr(errs); has {
+				errs = append(errs, err)
+			} else {
+				err, _ := celValidator.Validate(ctx, nil, a.structuralSchemas[v], u.Object, nil, cel.RuntimeCELCostBudget)
+				errs = append(errs, err...)
+			}
+		}
 	}
 
 	return errs
+}
+
+// WarningsOnCreate returns warnings for the creation of the given object.
+func (customResourceStrategy) WarningsOnCreate(ctx context.Context, obj runtime.Object) []string {
+	return nil
 }
 
 // Canonicalize normalizes the object after validation.
@@ -165,13 +212,40 @@ func (a customResourceStrategy) ValidateUpdate(ctx context.Context, obj, old run
 	var errs field.ErrorList
 	errs = append(errs, a.validator.ValidateUpdate(ctx, obj, old, a.scale)...)
 
+	uNew, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return errs
+	}
+	uOld, ok := old.(*unstructured.Unstructured)
+	if !ok {
+		return errs
+	}
+
 	// Checks the embedded objects. We don't make a difference between update and create for those.
-	if u, ok := obj.(*unstructured.Unstructured); ok {
-		v := obj.GetObjectKind().GroupVersionKind().Version
-		errs = append(errs, schemaobjectmeta.Validate(nil, u.Object, a.schemas[v], false)...)
+	v := obj.GetObjectKind().GroupVersionKind().Version
+	errs = append(errs, schemaobjectmeta.Validate(nil, uNew.Object, a.structuralSchemas[v], false)...)
+
+	// ratcheting validation of x-kubernetes-list-type value map and set
+	if oldErrs := structurallisttype.ValidateListSetsAndMaps(nil, a.structuralSchemas[v], uOld.Object); len(oldErrs) == 0 {
+		errs = append(errs, structurallisttype.ValidateListSetsAndMaps(nil, a.structuralSchemas[v], uNew.Object)...)
+	}
+
+	// validate x-kubernetes-validations rules
+	if celValidator, ok := a.celValidators[v]; ok {
+		if has, err := hasBlockingErr(errs); has {
+			errs = append(errs, err)
+		} else {
+			err, _ := celValidator.Validate(ctx, nil, a.structuralSchemas[v], uNew.Object, uOld.Object, cel.RuntimeCELCostBudget)
+			errs = append(errs, err...)
+		}
 	}
 
 	return errs
+}
+
+// WarningsOnUpdate returns warnings for the given update.
+func (customResourceStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
+	return nil
 }
 
 // GetAttrs returns labels and fields of a given object for filtering purposes.
@@ -205,4 +279,14 @@ func (a customResourceStrategy) MatchCustomResourceDefinitionStorage(label label
 		Field:    field,
 		GetAttrs: a.GetAttrs,
 	}
+}
+
+// OpenAPIv3 type/maxLength/maxItems/MaxProperties/required/wrong type field validation failures are viewed as blocking err for CEL validation
+func hasBlockingErr(errs field.ErrorList) (bool, *field.Error) {
+	for _, err := range errs {
+		if err.Type == field.ErrorTypeRequired || err.Type == field.ErrorTypeTooLong || err.Type == field.ErrorTypeTooMany || err.Type == field.ErrorTypeTypeInvalid {
+			return true, field.Invalid(nil, nil, "some validation rules were not checked because the object was invalid; correct the existing errors to complete validation")
+		}
+	}
+	return false, nil
 }

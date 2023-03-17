@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vapi/tags"
@@ -33,9 +34,11 @@ import (
 	neturl "net/url"
 )
 
+// NodeMapper contains information to generate nameToNodeInfo and vcToZoneDatastore maps
 type NodeMapper struct {
 }
 
+// NodeInfo contains information about vcenter nodes
 type NodeInfo struct {
 	Name              string
 	DataCenterRef     types.ManagedObjectReference
@@ -46,9 +49,9 @@ type NodeInfo struct {
 }
 
 const (
-	DatacenterType             = "Datacenter"
-	ClusterComputeResourceType = "ClusterComputeResource"
-	HostSystemType             = "HostSystem"
+	datacenterType             = "Datacenter"
+	clusterComputeResourceType = "ClusterComputeResource"
+	hostSystemType             = "HostSystem"
 )
 
 var (
@@ -58,13 +61,13 @@ var (
 
 // GenerateNodeMap populates node name to node info map
 func (nm *NodeMapper) GenerateNodeMap(vSphereInstances map[string]*VSphere, nodeList v1.NodeList) error {
-	type VmSearch struct {
+	type VMSearch struct {
 		vs         *VSphere
 		datacenter *object.Datacenter
 	}
 
 	var wg sync.WaitGroup
-	var queueChannel []*VmSearch
+	var queueChannel []*VMSearch
 
 	var datacenters []*object.Datacenter
 	var err error
@@ -99,7 +102,7 @@ func (nm *NodeMapper) GenerateNodeMap(vSphereInstances map[string]*VSphere, node
 
 		for _, dc := range datacenters {
 			framework.Logf("Search candidates vc=%s and datacenter=%s", vs.Config.Hostname, dc.Name())
-			queueChannel = append(queueChannel, &VmSearch{vs: vs, datacenter: dc})
+			queueChannel = append(queueChannel, &VMSearch{vs: vs, datacenter: dc})
 		}
 	}
 
@@ -146,7 +149,7 @@ func withTagsClient(ctx context.Context, connection *VSphere, f func(c *rest.Cli
 	if err := c.Login(ctx, user); err != nil {
 		return err
 	}
-	defer c.Logout(ctx)
+	ginkgo.DeferCleanup(c.Logout)
 	return f(c)
 }
 
@@ -170,7 +173,7 @@ func retrieveZoneInformationForNode(nodeName string, connection *VSphere, hostSy
 		// zone precedence will be received by the HostSystem type.
 		for _, ancestor := range ancestors {
 			moType := ancestor.ExtensibleManagedObject.Self.Type
-			if moType == DatacenterType || moType == ClusterComputeResourceType || moType == HostSystemType {
+			if moType == datacenterType || moType == clusterComputeResourceType || moType == hostSystemType {
 				validAncestors = append(validAncestors, ancestor)
 			}
 		}
@@ -208,7 +211,7 @@ func retrieveZoneInformationForNode(nodeName string, connection *VSphere, hostSy
 	return zones
 }
 
-// Generate zone to datastore mapping for easily verifying volume placement
+// GenerateZoneToDatastoreMap generates a mapping of zone to datastore for easily verifying volume placement
 func (nm *NodeMapper) GenerateZoneToDatastoreMap() error {
 	// 1. Create zone to hosts map for each VC
 	var vcToZoneHostsMap = make(map[string](map[string][]string))
@@ -254,7 +257,7 @@ func (nm *NodeMapper) GenerateZoneToDatastoreMap() error {
 	return nil
 }
 
-// Retrieves the common datastores from the specified hosts
+// retrieveCommonDatastoresAmongHosts retrieves the common datastores from the specified hosts
 func retrieveCommonDatastoresAmongHosts(hosts []string, hostToDatastoresMap map[string][]string) []string {
 	var datastoreCountMap = make(map[string]int)
 	for _, host := range hosts {
@@ -272,12 +275,12 @@ func retrieveCommonDatastoresAmongHosts(hosts []string, hostToDatastoresMap map[
 	return commonDatastores
 }
 
-// Get all the datastores in the specified zone
+// GetDatastoresInZone returns all the datastores in the specified zone
 func (nm *NodeMapper) GetDatastoresInZone(vc string, zone string) []string {
 	return vcToZoneDatastoresMap[vc][zone]
 }
 
-// GetNodeInfo return NodeInfo for given nodeName
+// GetNodeInfo returns NodeInfo for given nodeName
 func (nm *NodeMapper) GetNodeInfo(nodeName string) *NodeInfo {
 	return nameToNodeInfo[nodeName]
 }

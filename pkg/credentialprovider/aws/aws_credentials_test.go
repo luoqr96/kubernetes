@@ -32,7 +32,7 @@ import (
 )
 
 const user = "foo"
-const password = "1234567890abcdef"
+const password = "1234567890abcdef" // Fake value for testing.
 const email = "not@val.id"
 
 // Mock implementation
@@ -82,6 +82,12 @@ func TestRegistryPatternMatch(t *testing.T) {
 		{"123456789012.dkr.ecr-fips.lala-land-1.amazonaws.com", true},
 		// .cn
 		{"123456789012.dkr.ecr.lala-land-1.amazonaws.com.cn", true},
+		// iso
+		{"123456789012.dkr.ecr.us-iso-east-1.c2s.ic.gov", true},
+		// iso-b
+		{"123456789012.dkr.ecr.us-isob-east-1.sc2s.sgov.gov", true},
+		// invalid gov endpoint
+		{"123456789012.dkr.ecr.us-iso-east-1.amazonaws.gov", false},
 		// registry ID too long
 		{"1234567890123.dkr.ecr.lala-land-1.amazonaws.com", false},
 		// registry ID too short
@@ -154,6 +160,10 @@ func TestParseRepoURLFail(t *testing.T) {
 	}
 }
 
+func isAlwaysEC2() bool {
+	return true
+}
+
 func TestECRProvide(t *testing.T) {
 	registry := "123456789012.dkr.ecr.lala-land-1.amazonaws.com"
 	otherRegistries := []string{
@@ -168,7 +178,7 @@ func TestECRProvide(t *testing.T) {
 			password: password,
 			endpoint: registry,
 		},
-	})
+	}, isAlwaysEC2)
 	keyring := &credentialprovider.BasicDockerKeyring{}
 	keyring.Add(p.Provide(image))
 
@@ -213,7 +223,7 @@ func TestECRProvideCached(t *testing.T) {
 			endpoint:          registry,
 			randomizePassword: true,
 		},
-	})
+	}, isAlwaysEC2)
 	image1 := path.Join(registry, "foo/bar")
 	image2 := path.Join(registry, "bar/baz")
 	keyring := &credentialprovider.BasicDockerKeyring{}
@@ -266,7 +276,7 @@ func TestChinaECRProvide(t *testing.T) {
 			password: password,
 			endpoint: registry,
 		},
-	})
+	}, isAlwaysEC2)
 	keyring := &credentialprovider.BasicDockerKeyring{}
 	keyring.Add(p.Provide(image))
 	// Verify that we get the expected username/password combo for
@@ -310,7 +320,7 @@ func TestChinaECRProvideCached(t *testing.T) {
 			endpoint:          registry,
 			randomizePassword: true,
 		},
-	})
+	}, isAlwaysEC2)
 	image := path.Join(registry, "foo/bar")
 	keyring := &credentialprovider.BasicDockerKeyring{}
 	keyring.Add(p.Provide(image))
@@ -330,4 +340,9 @@ func TestChinaECRProvideCached(t *testing.T) {
 	if creds[0].Password != creds[1].Password {
 		t.Errorf("cached credentials do not match")
 	}
+}
+
+func BenchmarkSetupLatency(b *testing.B) {
+	p := newECRProvider(&ecrTokenGetterFactory{cache: make(map[string]tokenGetter)}, ec2ValidationImpl)
+	_ = p.Enabled()
 }

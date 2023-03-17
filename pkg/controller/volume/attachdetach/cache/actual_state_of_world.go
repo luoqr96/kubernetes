@@ -26,9 +26,11 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/apimachinery/pkg/api/resource"
 
-	"k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
@@ -96,10 +98,13 @@ type ActualStateOfWorld interface {
 	// nodes, the volume is also deleted.
 	DeleteVolumeNode(volumeName v1.UniqueVolumeName, nodeName types.NodeName)
 
-	// IsVolumeAttachedToNode returns true if the specified volume/node combo exists
-	// in the underlying store indicating the specified volume is attached to
-	// the specified node.
-	IsVolumeAttachedToNode(volumeName v1.UniqueVolumeName, nodeName types.NodeName) bool
+	// GetAttachState returns the attach state for the given volume-node
+	// combination.
+	// Returns AttachStateAttached if the specified volume/node combo exists in
+	// the underlying store indicating the specified volume is attached to the
+	// specified node, AttachStateDetached if the combo does not exist, or
+	// AttachStateUncertain if the attached state is marked as uncertain.
+	GetAttachState(volumeName v1.UniqueVolumeName, nodeName types.NodeName) AttachState
 
 	// GetAttachedVolumes generates and returns a list of volumes/node pairs
 	// reflecting which volumes might attached to which nodes based on the
@@ -120,7 +125,7 @@ type ActualStateOfWorld interface {
 	GetAttachedVolumesPerNode() map[types.NodeName][]operationexecutor.AttachedVolume
 
 	// GetNodesForAttachedVolume returns the nodes on which the volume is attached.
-	// This function is used by reconciler for mutli-attach check.
+	// This function is used by reconciler for multi-attach check.
 	GetNodesForAttachedVolume(volumeName v1.UniqueVolumeName) []types.NodeName
 
 	// GetVolumesToReportAttached returns a map containing the set of nodes for
@@ -131,6 +136,11 @@ type ActualStateOfWorld interface {
 	// since volumes should be removed from this list as soon a detach operation
 	// is considered, before the detach operation is triggered).
 	GetVolumesToReportAttached() map[types.NodeName][]v1.AttachedVolume
+
+	// GetVolumesToReportAttachedForNode returns the list of volumes that should be reported as
+	// attached for the given node. It reports a boolean indicating if there is an update for that
+	// node and the corresponding attachedVolumes list.
+	GetVolumesToReportAttachedForNode(name types.NodeName) (bool, []v1.AttachedVolume)
 
 	// GetNodesToUpdateStatusFor returns the map of nodeNames to nodeToUpdateStatusFor
 	GetNodesToUpdateStatusFor() map[types.NodeName]nodeToUpdateStatusFor
@@ -151,6 +161,31 @@ type AttachedVolume struct {
 	// was previously set to zero (other wise its value remains the same).
 	// It is reset to zero on ResetDetachRequestTime(...) calls.
 	DetachRequestedTime time.Time
+}
+
+// AttachState represents the attach state of a volume to a node known to the
+// Actual State of World.
+// This type is used as external representation of attach state (specifically
+// as the return type of GetAttachState only); the state is represented
+// differently in the internal cache implementation.
+type AttachState int
+
+const (
+	// AttachStateAttached represents the state in which the volume is attached to
+	// the node.
+	AttachStateAttached AttachState = iota
+
+	// AttachStateUncertain represents the state in which the Actual State of World
+	// does not know whether the volume is attached to the node.
+	AttachStateUncertain
+
+	// AttachStateDetached represents the state in which the volume is not
+	// attached to the node.
+	AttachStateDetached
+)
+
+func (s AttachState) String() string {
+	return []string{"Attached", "Uncertain", "Detached"}[s]
 }
 
 // NewActualStateOfWorld returns a new instance of ActualStateOfWorld.
@@ -530,19 +565,32 @@ func (asw *actualStateOfWorld) DeleteVolumeNode(
 	asw.removeVolumeFromReportAsAttached(volumeName, nodeName)
 }
 
-func (asw *actualStateOfWorld) IsVolumeAttachedToNode(
-	volumeName v1.UniqueVolumeName, nodeName types.NodeName) bool {
+func (asw *actualStateOfWorld) GetAttachState(
+	volumeName v1.UniqueVolumeName, nodeName types.NodeName) AttachState {
 	asw.RLock()
 	defer asw.RUnlock()
 
 	volumeObj, volumeExists := asw.attachedVolumes[volumeName]
 	if volumeExists {
 		if node, nodeExists := volumeObj.nodesAttachedTo[nodeName]; nodeExists {
-			return node.attachedConfirmed
+			if node.attachedConfirmed {
+				return AttachStateAttached
+			}
+			return AttachStateUncertain
 		}
 	}
 
-	return false
+	return AttachStateDetached
+}
+
+// SetVolumeClaimSize sets size of the volume. But this function should not be used from attach_detach controller.
+func (asw *actualStateOfWorld) InitializeClaimSize(volumeName v1.UniqueVolumeName, claimSize *resource.Quantity) {
+	klog.V(5).Infof("no-op InitializeClaimSize call in attach-detach controller.")
+}
+
+func (asw *actualStateOfWorld) GetClaimSize(volumeName v1.UniqueVolumeName) *resource.Quantity {
+	// not needed in attach-detach controller
+	return nil
 }
 
 func (asw *actualStateOfWorld) GetAttachedVolumes() []AttachedVolume {
@@ -616,24 +664,13 @@ func (asw *actualStateOfWorld) GetNodesForAttachedVolume(volumeName v1.UniqueVol
 }
 
 func (asw *actualStateOfWorld) GetVolumesToReportAttached() map[types.NodeName][]v1.AttachedVolume {
-	asw.RLock()
-	defer asw.RUnlock()
+	asw.Lock()
+	defer asw.Unlock()
 
 	volumesToReportAttached := make(map[types.NodeName][]v1.AttachedVolume)
 	for nodeName, nodeToUpdateObj := range asw.nodesToUpdateStatusFor {
 		if nodeToUpdateObj.statusUpdateNeeded {
-			attachedVolumes := make(
-				[]v1.AttachedVolume,
-				0,
-				len(nodeToUpdateObj.volumesToReportAsAttached) /* len */)
-			for _, volume := range nodeToUpdateObj.volumesToReportAsAttached {
-				attachedVolumes = append(attachedVolumes,
-					v1.AttachedVolume{
-						Name:       volume,
-						DevicePath: asw.attachedVolumes[volume].devicePath,
-					})
-			}
-			volumesToReportAttached[nodeToUpdateObj.nodeName] = attachedVolumes
+			volumesToReportAttached[nodeToUpdateObj.nodeName] = asw.getAttachedVolumeFromUpdateObject(nodeToUpdateObj.volumesToReportAsAttached)
 		}
 		// When GetVolumesToReportAttached is called by node status updater, the current status
 		// of this node will be updated, so set the flag statusUpdateNeeded to false indicating
@@ -646,8 +683,46 @@ func (asw *actualStateOfWorld) GetVolumesToReportAttached() map[types.NodeName][
 	return volumesToReportAttached
 }
 
+func (asw *actualStateOfWorld) GetVolumesToReportAttachedForNode(nodeName types.NodeName) (bool, []v1.AttachedVolume) {
+	asw.Lock()
+	defer asw.Unlock()
+
+	nodeToUpdateObj, ok := asw.nodesToUpdateStatusFor[nodeName]
+	if !ok {
+		return false, nil
+	}
+	if !nodeToUpdateObj.statusUpdateNeeded {
+		return false, nil
+	}
+
+	volumesToReportAttached := asw.getAttachedVolumeFromUpdateObject(nodeToUpdateObj.volumesToReportAsAttached)
+	// When GetVolumesToReportAttached is called by node status updater, the current status
+	// of this node will be updated, so set the flag statusUpdateNeeded to false indicating
+	// the current status is already updated.
+	if err := asw.updateNodeStatusUpdateNeeded(nodeName, false); err != nil {
+		klog.Errorf("Failed to update statusUpdateNeeded field when getting volumes: %v", err)
+	}
+
+	return true, volumesToReportAttached
+}
+
 func (asw *actualStateOfWorld) GetNodesToUpdateStatusFor() map[types.NodeName]nodeToUpdateStatusFor {
 	return asw.nodesToUpdateStatusFor
+}
+
+func (asw *actualStateOfWorld) getAttachedVolumeFromUpdateObject(volumesToReportAsAttached map[v1.UniqueVolumeName]v1.UniqueVolumeName) []v1.AttachedVolume {
+	var attachedVolumes = make(
+		[]v1.AttachedVolume,
+		0,
+		len(volumesToReportAsAttached) /* len */)
+	for _, volume := range volumesToReportAsAttached {
+		attachedVolumes = append(attachedVolumes,
+			v1.AttachedVolume{
+				Name:       volume,
+				DevicePath: asw.attachedVolumes[volume].devicePath,
+			})
+	}
+	return attachedVolumes
 }
 
 func getAttachedVolume(

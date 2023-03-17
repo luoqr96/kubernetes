@@ -17,12 +17,13 @@ limitations under the License.
 package bootstrap
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -78,16 +79,16 @@ func addSecretExpiration(s *v1.Secret, expiration string) {
 }
 
 // TimeStringFromNow returns the time as a string from now.
-// e.g: 2019-12-03T14:30:40+08:00.
+// e.g: 2019-12-03T06:30:40Z.
 func TimeStringFromNow(delta time.Duration) string {
-	return time.Now().Add(delta).Format(time.RFC3339)
+	return time.Now().Add(delta).UTC().Format(time.RFC3339)
 }
 
 // WaitforSignedClusterInfoByBootStrapToken waits for signed cluster info by bootstrap token.
 func WaitforSignedClusterInfoByBootStrapToken(c clientset.Interface, tokenID string) error {
 
 	return wait.Poll(framework.Poll, 2*time.Minute, func() (bool, error) {
-		cfgMap, err := c.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+		cfgMap, err := c.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(context.TODO(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
 		if err != nil {
 			framework.Failf("Failed to get cluster-info configMap: %v", err)
 			return false, err
@@ -104,7 +105,7 @@ func WaitforSignedClusterInfoByBootStrapToken(c clientset.Interface, tokenID str
 func WaitForSignedClusterInfoGetUpdatedByBootstrapToken(c clientset.Interface, tokenID string, signedToken string) error {
 
 	return wait.Poll(framework.Poll, 2*time.Minute, func() (bool, error) {
-		cfgMap, err := c.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+		cfgMap, err := c.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(context.TODO(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
 		if err != nil {
 			framework.Failf("Failed to get cluster-info configMap: %v", err)
 			return false, err
@@ -121,7 +122,7 @@ func WaitForSignedClusterInfoGetUpdatedByBootstrapToken(c clientset.Interface, t
 func WaitForSignedClusterInfoByBootstrapTokenToDisappear(c clientset.Interface, tokenID string) error {
 
 	return wait.Poll(framework.Poll, 2*time.Minute, func() (bool, error) {
-		cfgMap, err := c.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+		cfgMap, err := c.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(context.TODO(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
 		if err != nil {
 			framework.Failf("Failed to get cluster-info configMap: %v", err)
 			return false, err
@@ -138,7 +139,7 @@ func WaitForSignedClusterInfoByBootstrapTokenToDisappear(c clientset.Interface, 
 func WaitForBootstrapTokenSecretToDisappear(c clientset.Interface, tokenID string) error {
 
 	return wait.Poll(framework.Poll, 1*time.Minute, func() (bool, error) {
-		_, err := c.CoreV1().Secrets(metav1.NamespaceSystem).Get(bootstrapapi.BootstrapTokenSecretPrefix+tokenID, metav1.GetOptions{})
+		_, err := c.CoreV1().Secrets(metav1.NamespaceSystem).Get(context.TODO(), bootstrapapi.BootstrapTokenSecretPrefix+tokenID, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -149,7 +150,7 @@ func WaitForBootstrapTokenSecretToDisappear(c clientset.Interface, tokenID strin
 // WaitForBootstrapTokenSecretNotDisappear waits for bootstrap token secret not to be disappeared and takes time for the specified timeout as success path.
 func WaitForBootstrapTokenSecretNotDisappear(c clientset.Interface, tokenID string, t time.Duration) error {
 	err := wait.Poll(framework.Poll, t, func() (bool, error) {
-		secret, err := c.CoreV1().Secrets(metav1.NamespaceSystem).Get(bootstrapapi.BootstrapTokenSecretPrefix+tokenID, metav1.GetOptions{})
+		secret, err := c.CoreV1().Secrets(metav1.NamespaceSystem).Get(context.TODO(), bootstrapapi.BootstrapTokenSecretPrefix+tokenID, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, errors.New("secret not exists")
 		}

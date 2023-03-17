@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Kubernetes Authors.
+Copyright 2022 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,9 +22,11 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/kube-openapi/pkg/util/proto"
-	"sigs.k8s.io/structured-merge-diff/typed"
-	"sigs.k8s.io/structured-merge-diff/value"
+	"k8s.io/kube-openapi/pkg/schemaconv"
+	"k8s.io/kube-openapi/pkg/validation/spec"
+	smdschema "sigs.k8s.io/structured-merge-diff/v4/schema"
+	"sigs.k8s.io/structured-merge-diff/v4/typed"
+	"sigs.k8s.io/structured-merge-diff/v4/value"
 )
 
 // TypeConverter allows you to convert from runtime.Object to
@@ -34,93 +36,167 @@ type TypeConverter interface {
 	TypedToObject(*typed.TypedValue) (runtime.Object, error)
 }
 
-// DeducedTypeConverter is a TypeConverter for CRDs that don't have a
-// schema. It does implement the same interface though (and create the
-// same types of objects), so that everything can still work the same.
-// CRDs are merged with all their fields being "atomic" (lists
-// included).
-//
-// Note that this is not going to be sufficient for converting to/from
-// CRDs that have a schema defined (we don't support that schema yet).
-// TODO(jennybuckley): Use the schema provided by a CRD if it exists.
-type DeducedTypeConverter struct{}
-
-var _ TypeConverter = DeducedTypeConverter{}
-
-// ObjectToTyped converts an object into a TypedValue with a "deduced type".
-func (DeducedTypeConverter) ObjectToTyped(obj runtime.Object) (*typed.TypedValue, error) {
-	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
-	if err != nil {
-		return nil, err
-	}
-	return typed.DeducedParseableType.FromUnstructured(u)
-}
-
-// TypedToObject transforms the typed value into a runtime.Object. That
-// is not specific to deduced type.
-func (DeducedTypeConverter) TypedToObject(value *typed.TypedValue) (runtime.Object, error) {
-	return valueToObject(value.AsValue())
-}
-
 type typeConverter struct {
-	parser *gvkParser
+	parser map[schema.GroupVersionKind]*typed.ParseableType
 }
 
 var _ TypeConverter = &typeConverter{}
 
-// NewTypeConverter builds a TypeConverter from a proto.Models. This
+// NewTypeConverter builds a TypeConverter from a spec.Swagger. This
 // will automatically find the proper version of the object, and the
 // corresponding schema information.
-func NewTypeConverter(models proto.Models, preserveUnknownFields bool) (TypeConverter, error) {
-	parser, err := newGVKParser(models, preserveUnknownFields)
-	if err != nil {
-		return nil, err
+func NewTypeConverter(openapiSpec *spec.Swagger, preserveUnknownFields bool) (TypeConverter, error) {
+	pointerDefs := map[string]*spec.Schema{}
+	for k, v := range openapiSpec.Definitions {
+		vCopy := v
+		pointerDefs[k] = &vCopy
 	}
-	return &typeConverter{parser: parser}, nil
+
+	typeSchema, err := schemaconv.ToSchemaFromOpenAPI(pointerDefs, preserveUnknownFields)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert models to schema: %v", err)
+	}
+
+	typeParser := typed.Parser{Schema: smdschema.Schema{Types: typeSchema.Types}}
+	tr := indexModels(&typeParser, pointerDefs)
+
+	return &typeConverter{parser: tr}, nil
 }
 
 func (c *typeConverter) ObjectToTyped(obj runtime.Object) (*typed.TypedValue, error) {
-	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
-	if err != nil {
-		return nil, err
-	}
 	gvk := obj.GetObjectKind().GroupVersionKind()
-	t := c.parser.Type(gvk)
+	t := c.parser[gvk]
 	if t == nil {
-		return nil, newNoCorrespondingTypeError(gvk)
+		return nil, NewNoCorrespondingTypeError(gvk)
 	}
-	return t.FromUnstructured(u)
+	switch o := obj.(type) {
+	case *unstructured.Unstructured:
+		return t.FromUnstructured(o.UnstructuredContent())
+	default:
+		return t.FromStructured(obj)
+	}
 }
 
 func (c *typeConverter) TypedToObject(value *typed.TypedValue) (runtime.Object, error) {
 	return valueToObject(value.AsValue())
 }
 
-func valueToObject(value *value.Value) (runtime.Object, error) {
-	vu := value.ToUnstructured(false)
-	u, ok := vu.(map[string]interface{})
+type deducedTypeConverter struct{}
+
+// DeducedTypeConverter is a TypeConverter for CRDs that don't have a
+// schema. It does implement the same interface though (and create the
+// same types of objects), so that everything can still work the same.
+// CRDs are merged with all their fields being "atomic" (lists
+// included).
+func NewDeducedTypeConverter() TypeConverter {
+	return deducedTypeConverter{}
+}
+
+// ObjectToTyped converts an object into a TypedValue with a "deduced type".
+func (deducedTypeConverter) ObjectToTyped(obj runtime.Object) (*typed.TypedValue, error) {
+	switch o := obj.(type) {
+	case *unstructured.Unstructured:
+		return typed.DeducedParseableType.FromUnstructured(o.UnstructuredContent())
+	default:
+		return typed.DeducedParseableType.FromStructured(obj)
+	}
+}
+
+// TypedToObject transforms the typed value into a runtime.Object. That
+// is not specific to deduced type.
+func (deducedTypeConverter) TypedToObject(value *typed.TypedValue) (runtime.Object, error) {
+	return valueToObject(value.AsValue())
+}
+
+func valueToObject(val value.Value) (runtime.Object, error) {
+	vu := val.Unstructured()
+	switch o := vu.(type) {
+	case map[string]interface{}:
+		return &unstructured.Unstructured{Object: o}, nil
+	default:
+		return nil, fmt.Errorf("failed to convert value to unstructured for type %T", vu)
+	}
+}
+
+func indexModels(
+	typeParser *typed.Parser,
+	openAPISchemas map[string]*spec.Schema,
+) map[schema.GroupVersionKind]*typed.ParseableType {
+	tr := map[schema.GroupVersionKind]*typed.ParseableType{}
+	for modelName, model := range openAPISchemas {
+		gvkList := parseGroupVersionKind(model.Extensions)
+		if len(gvkList) == 0 {
+			continue
+		}
+
+		parsedType := typeParser.Type(modelName)
+		for _, gvk := range gvkList {
+			if len(gvk.Kind) > 0 {
+				tr[schema.GroupVersionKind(gvk)] = &parsedType
+			}
+		}
+	}
+	return tr
+}
+
+// Get and parse GroupVersionKind from the extension. Returns empty if it doesn't have one.
+func parseGroupVersionKind(extensions map[string]interface{}) []schema.GroupVersionKind {
+	gvkListResult := []schema.GroupVersionKind{}
+
+	// Get the extensions
+	gvkExtension, ok := extensions["x-kubernetes-group-version-kind"]
 	if !ok {
-		return nil, fmt.Errorf("failed to convert typed to unstructured: want map, got %T", vu)
+		return []schema.GroupVersionKind{}
 	}
-	return &unstructured.Unstructured{Object: u}, nil
-}
 
-type noCorrespondingTypeErr struct {
-	gvk schema.GroupVersionKind
-}
-
-func newNoCorrespondingTypeError(gvk schema.GroupVersionKind) error {
-	return &noCorrespondingTypeErr{gvk: gvk}
-}
-
-func (k *noCorrespondingTypeErr) Error() string {
-	return fmt.Sprintf("no corresponding type for %v", k.gvk)
-}
-
-func isNoCorrespondingTypeError(err error) bool {
-	if err == nil {
-		return false
+	// gvk extension must be a list of at least 1 element.
+	gvkList, ok := gvkExtension.([]interface{})
+	if !ok {
+		return []schema.GroupVersionKind{}
 	}
-	_, ok := err.(*noCorrespondingTypeErr)
-	return ok
+
+	for _, gvk := range gvkList {
+		var group, version, kind string
+
+		// gvk extension list must be a map with group, version, and
+		// kind fields
+		if gvkMap, ok := gvk.(map[interface{}]interface{}); ok {
+			group, ok = gvkMap["group"].(string)
+			if !ok {
+				continue
+			}
+			version, ok = gvkMap["version"].(string)
+			if !ok {
+				continue
+			}
+			kind, ok = gvkMap["kind"].(string)
+			if !ok {
+				continue
+			}
+
+		} else if gvkMap, ok := gvk.(map[string]interface{}); ok {
+			group, ok = gvkMap["group"].(string)
+			if !ok {
+				continue
+			}
+			version, ok = gvkMap["version"].(string)
+			if !ok {
+				continue
+			}
+			kind, ok = gvkMap["kind"].(string)
+			if !ok {
+				continue
+			}
+		} else {
+			continue
+		}
+
+		gvkListResult = append(gvkListResult, schema.GroupVersionKind{
+			Group:   group,
+			Version: version,
+			Kind:    kind,
+		})
+	}
+
+	return gvkListResult
 }

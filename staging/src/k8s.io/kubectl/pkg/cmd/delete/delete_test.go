@@ -19,8 +19,8 @@ package delete
 import (
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,6 +33,7 @@ import (
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/rest/fake"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
 )
 
@@ -42,6 +43,7 @@ func fakecmd() *cobra.Command {
 		DisableFlagsInUseLine: true,
 		Run:                   func(cmd *cobra.Command, args []string) {},
 	}
+	cmdutil.AddDryRunFlag(cmd)
 	return cmd
 }
 
@@ -101,7 +103,7 @@ func hasExpectedPropagationPolicy(body io.ReadCloser, policy *metav1.DeletionPro
 		return body == nil && policy == nil
 	}
 	var parsedBody metav1.DeleteOptions
-	rawBody, _ := ioutil.ReadAll(body)
+	rawBody, _ := io.ReadAll(body)
 	json.Unmarshal(rawBody, &parsedBody)
 	if parsedBody.PropagationPolicy == nil {
 		return false
@@ -109,8 +111,8 @@ func hasExpectedPropagationPolicy(body io.ReadCloser, policy *metav1.DeletionPro
 	return *policy == *parsedBody.PropagationPolicy
 }
 
-// Tests that DeleteOptions.OrphanDependents is appropriately set while deleting objects.
-func TestOrphanDependentsInDeleteObject(t *testing.T) {
+// TestCascadingStrategy tests that DeleteOptions.DeletionPropagation is appropriately set while deleting objects.
+func TestCascadingStrategy(t *testing.T) {
 	cmdtesting.InitTestErrorHandler(t)
 	_, _, rc := cmdtesting.TestData()
 
@@ -134,7 +136,7 @@ func TestOrphanDependentsInDeleteObject(t *testing.T) {
 		}),
 	}
 
-	// DeleteOptions.PropagationPolicy should be Background, when cascade is true (default).
+	// DeleteOptions.PropagationPolicy should be Background, when cascading strategy is empty (default).
 	backgroundPolicy := metav1.DeletePropagationBackground
 	policy = &backgroundPolicy
 	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
@@ -146,13 +148,26 @@ func TestOrphanDependentsInDeleteObject(t *testing.T) {
 		t.Errorf("unexpected output: %s", buf.String())
 	}
 
-	// Test that delete options should be set to orphan when cascade is false.
+	// DeleteOptions.PropagationPolicy should be Foreground, when cascading strategy is foreground.
+	foregroundPolicy := metav1.DeletePropagationForeground
+	policy = &foregroundPolicy
+	streams, _, buf, _ = genericclioptions.NewTestIOStreams()
+	cmd = NewCmdDelete(tf, streams)
+	cmd.Flags().Set("namespace", "test")
+	cmd.Flags().Set("cascade", "foreground")
+	cmd.Flags().Set("output", "name")
+	cmd.Run(cmd, []string{"secrets/mysecret"})
+	if buf.String() != "secret/mysecret\n" {
+		t.Errorf("unexpected output: %s", buf.String())
+	}
+
+	// Test that delete options should be set to orphan when cascading strategy is orphan.
 	orphanPolicy := metav1.DeletePropagationOrphan
 	policy = &orphanPolicy
 	streams, _, buf, _ = genericclioptions.NewTestIOStreams()
 	cmd = NewCmdDelete(tf, streams)
 	cmd.Flags().Set("namespace", "test")
-	cmd.Flags().Set("cascade", "false")
+	cmd.Flags().Set("cascade", "orphan")
 	cmd.Flags().Set("output", "name")
 	cmd.Run(cmd, []string{"secrets/mysecret"})
 	if buf.String() != "secret/mysecret\n" {
@@ -248,52 +263,157 @@ func TestDeleteObject(t *testing.T) {
 	}
 }
 
-func TestDeleteObjectGraceZero(t *testing.T) {
-	cmdtesting.InitTestErrorHandler(t)
+func TestGracePeriodScenarios(t *testing.T) {
 	pods, _, _ := cmdtesting.TestData()
 
-	count := 0
 	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
 	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
-	tf.UnstructuredClient = &fake.RESTClient{
-		NegotiatedSerializer: resource.UnstructuredPlusDefaultContentConfig().NegotiatedSerializer,
-		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-			t.Logf("got request %s %s", req.Method, req.URL.Path)
-			switch p, m := req.URL.Path, req.Method; {
-			case p == "/namespaces/test/pods/nginx" && m == "GET":
-				count++
-				switch count {
-				case 1, 2, 3:
-					return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: cmdtesting.ObjBody(codec, &pods.Items[0])}, nil
-				default:
-					return &http.Response{StatusCode: http.StatusNotFound, Header: cmdtesting.DefaultHeader(), Body: cmdtesting.ObjBody(codec, &metav1.Status{})}, nil
+	tc := []struct {
+		name                      string
+		cmdArgs                   []string
+		forceFlag                 bool
+		nowFlag                   bool
+		gracePeriodFlag           string
+		expectedGracePeriod       string
+		expectedOut               string
+		expectedErrOut            string
+		expectedDeleteRequestPath string
+		expectedExitCode          int
+	}{
+		{
+			name:                      "Deleting an object with --force should use grace period = 0",
+			cmdArgs:                   []string{"pods/foo"},
+			forceFlag:                 true,
+			expectedGracePeriod:       "0",
+			expectedOut:               "pod/foo\n",
+			expectedErrOut:            "Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.\n",
+			expectedDeleteRequestPath: "/namespaces/test/pods/foo",
+		},
+		{
+			name:                      "Deleting an object with --force and --grace-period 0 should use grade period = 0",
+			cmdArgs:                   []string{"pods/foo"},
+			forceFlag:                 true,
+			gracePeriodFlag:           "0",
+			expectedGracePeriod:       "0",
+			expectedOut:               "pod/foo\n",
+			expectedErrOut:            "Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.\n",
+			expectedDeleteRequestPath: "/namespaces/test/pods/foo",
+		},
+		{
+			name:             "Deleting an object with --force and --grace-period > 0 should fail",
+			cmdArgs:          []string{"pods/foo"},
+			forceFlag:        true,
+			gracePeriodFlag:  "10",
+			expectedErrOut:   "error: --force and --grace-period greater than 0 cannot be specified together",
+			expectedExitCode: 1,
+		},
+		{
+			name:                      "Deleting an object with --grace-period 0 should use a grace period of 1",
+			cmdArgs:                   []string{"pods/foo"},
+			gracePeriodFlag:           "0",
+			expectedGracePeriod:       "1",
+			expectedOut:               "pod/foo\n",
+			expectedDeleteRequestPath: "/namespaces/test/pods/foo",
+		},
+		{
+			name:                      "Deleting an object with --grace-period > 0 should use the specified grace period",
+			cmdArgs:                   []string{"pods/foo"},
+			gracePeriodFlag:           "10",
+			expectedGracePeriod:       "10",
+			expectedOut:               "pod/foo\n",
+			expectedDeleteRequestPath: "/namespaces/test/pods/foo",
+		},
+		{
+			name:                      "Deleting an object with the --now flag should use grace period = 1",
+			cmdArgs:                   []string{"pods/foo"},
+			nowFlag:                   true,
+			expectedGracePeriod:       "1",
+			expectedOut:               "pod/foo\n",
+			expectedDeleteRequestPath: "/namespaces/test/pods/foo",
+		},
+		{
+			name:             "Deleting an object with --now and --grace-period should fail",
+			cmdArgs:          []string{"pods/foo"},
+			nowFlag:          true,
+			gracePeriodFlag:  "10",
+			expectedErrOut:   "error: --now and --grace-period cannot be specified together",
+			expectedExitCode: 1,
+		},
+	}
+
+	for _, test := range tc {
+		t.Run(test.name, func(t *testing.T) {
+
+			// Use a custom fatal behavior with panic/recover so that we can test failure scenarios where
+			// os.Exit() would normally be called
+			cmdutil.BehaviorOnFatal(func(actualErrOut string, actualExitCode int) {
+				if test.expectedExitCode != actualExitCode {
+					t.Errorf("unexpected exit code:\n\tExpected: %d\n\tActual:   %d\n", test.expectedExitCode, actualExitCode)
 				}
-			case p == "/api/v1/namespaces/test" && m == "GET":
-				return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: cmdtesting.ObjBody(codec, &corev1.Namespace{})}, nil
-			case p == "/namespaces/test/pods/nginx" && m == "DELETE":
-				return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: cmdtesting.ObjBody(codec, &pods.Items[0])}, nil
-			default:
-				t.Fatalf("unexpected request: %#v\n%#v", req.URL, req)
-				return nil, nil
+				if test.expectedErrOut != actualErrOut {
+					t.Errorf("unexpected error:\n\tExpected: %s\n\tActual:   %s\n", test.expectedErrOut, actualErrOut)
+				}
+				panic(nil)
+			})
+			defer func() {
+				if test.expectedExitCode != 0 {
+					recover()
+				}
+			}()
+
+			// Setup a fake HTTP Client to capture whether a delete request was made or not and if so,
+			// the actual grace period that was used.
+			actualGracePeriod := ""
+			deleteOccurred := false
+			tf.UnstructuredClient = &fake.RESTClient{
+				NegotiatedSerializer: resource.UnstructuredPlusDefaultContentConfig().NegotiatedSerializer,
+				Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					switch p, m := req.URL.Path, req.Method; {
+					case m == "DELETE" && p == test.expectedDeleteRequestPath:
+						data := make(map[string]interface{})
+						_ = json.NewDecoder(req.Body).Decode(&data)
+						actualGracePeriod = strconv.FormatFloat(data["gracePeriodSeconds"].(float64), 'f', 0, 64)
+						deleteOccurred = true
+						return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: cmdtesting.ObjBody(codec, &pods.Items[0])}, nil
+					default:
+						t.Fatalf("unexpected request: %#v\n%#v", req.URL, req)
+						return nil, nil
+					}
+				}),
 			}
-		}),
-	}
 
-	streams, _, buf, errBuf := genericclioptions.NewTestIOStreams()
-	cmd := NewCmdDelete(tf, streams)
-	cmd.Flags().Set("output", "name")
-	cmd.Flags().Set("grace-period", "0")
-	cmd.Run(cmd, []string{"pods/nginx"})
+			// Test the command using the flags specified in the test case
+			streams, _, out, errOut := genericclioptions.NewTestIOStreams()
+			cmd := NewCmdDelete(tf, streams)
+			cmd.Flags().Set("output", "name")
+			if test.forceFlag {
+				cmd.Flags().Set("force", "true")
+			}
+			if test.nowFlag {
+				cmd.Flags().Set("now", "true")
+			}
+			if len(test.gracePeriodFlag) > 0 {
+				cmd.Flags().Set("grace-period", test.gracePeriodFlag)
+			}
+			cmd.Run(cmd, test.cmdArgs)
 
-	// uses the name from the file, not the response
-	if buf.String() != "pod/nginx\n" {
-		t.Errorf("unexpected output: %s\n---\n%s", buf.String(), errBuf.String())
-	}
-	if count != 0 {
-		t.Errorf("unexpected calls to GET: %d", count)
+			// Check actual vs expected conditions
+			if len(test.expectedDeleteRequestPath) > 0 && !deleteOccurred {
+				t.Errorf("expected http delete request to %s but it did not occur", test.expectedDeleteRequestPath)
+			}
+			if test.expectedGracePeriod != actualGracePeriod {
+				t.Errorf("unexpected grace period:\n\tExpected: %s\n\tActual:   %s\n", test.expectedGracePeriod, actualGracePeriod)
+			}
+			if out.String() != test.expectedOut {
+				t.Errorf("unexpected output:\n\tExpected: %s\n\tActual:   %s\n", test.expectedOut, out.String())
+			}
+			if errOut.String() != test.expectedErrOut {
+				t.Errorf("unexpected error output:\n\tExpected: %s\n\tActual:   %s\n", test.expectedErrOut, errOut.String())
+			}
+		})
 	}
 }
 
@@ -319,10 +439,10 @@ func TestDeleteObjectNotFound(t *testing.T) {
 		FilenameOptions: resource.FilenameOptions{
 			Filenames: []string{"../../../testdata/redis-master-controller.yaml"},
 		},
-		GracePeriod: -1,
-		Cascade:     false,
-		Output:      "name",
-		IOStreams:   genericclioptions.NewTestIOStreamsDiscard(),
+		GracePeriod:       -1,
+		CascadingStrategy: metav1.DeletePropagationOrphan,
+		Output:            "name",
+		IOStreams:         genericclioptions.NewTestIOStreamsDiscard(),
 	}
 	err := options.Complete(tf, []string{}, fakecmd())
 	if err != nil {
@@ -396,13 +516,13 @@ func TestDeleteAllNotFound(t *testing.T) {
 
 	// Make sure we can explicitly choose to fail on NotFound errors, even with --all
 	options := &DeleteOptions{
-		FilenameOptions: resource.FilenameOptions{},
-		GracePeriod:     -1,
-		Cascade:         false,
-		DeleteAll:       true,
-		IgnoreNotFound:  false,
-		Output:          "name",
-		IOStreams:       genericclioptions.NewTestIOStreamsDiscard(),
+		FilenameOptions:   resource.FilenameOptions{},
+		GracePeriod:       -1,
+		CascadingStrategy: metav1.DeletePropagationOrphan,
+		DeleteAll:         true,
+		IgnoreNotFound:    false,
+		Output:            "name",
+		IOStreams:         genericclioptions.NewTestIOStreamsDiscard(),
 	}
 	err := options.Complete(tf, []string{"services"}, fakecmd())
 	if err != nil {
@@ -522,10 +642,10 @@ func TestDeleteMultipleObjectContinueOnMissing(t *testing.T) {
 		FilenameOptions: resource.FilenameOptions{
 			Filenames: []string{"../../../testdata/redis-master-controller.yaml", "../../../testdata/frontend-service.yaml"},
 		},
-		GracePeriod: -1,
-		Cascade:     false,
-		Output:      "name",
-		IOStreams:   streams,
+		GracePeriod:       -1,
+		CascadingStrategy: metav1.DeletePropagationOrphan,
+		Output:            "name",
+		IOStreams:         streams,
 	}
 	err := options.Complete(tf, []string{}, fakecmd())
 	if err != nil {
@@ -673,13 +793,13 @@ func TestResourceErrors(t *testing.T) {
 		"resources but no selectors": {
 			args: []string{"pods"},
 			errFn: func(err error) bool {
-				return strings.Contains(err.Error(), "resource(s) were provided, but no name, label selector, or --all flag specified")
+				return strings.Contains(err.Error(), "resource(s) were provided, but no name was specified")
 			},
 		},
 		"multiple resources but no selectors": {
 			args: []string{"pods,deployments"},
 			errFn: func(err error) bool {
-				return strings.Contains(err.Error(), "resource(s) were provided, but no name, label selector, or --all flag specified")
+				return strings.Contains(err.Error(), "resource(s) were provided, but no name was specified")
 			},
 		},
 	}
@@ -693,11 +813,11 @@ func TestResourceErrors(t *testing.T) {
 
 			streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 			options := &DeleteOptions{
-				FilenameOptions: resource.FilenameOptions{},
-				GracePeriod:     -1,
-				Cascade:         false,
-				Output:          "name",
-				IOStreams:       streams,
+				FilenameOptions:   resource.FilenameOptions{},
+				GracePeriod:       -1,
+				CascadingStrategy: metav1.DeletePropagationOrphan,
+				Output:            "name",
+				IOStreams:         streams,
 			}
 			err := options.Complete(tf, testCase.args, fakecmd())
 			if !testCase.errFn(err) {

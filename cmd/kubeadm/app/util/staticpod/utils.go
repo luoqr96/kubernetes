@@ -19,11 +19,13 @@ package staticpod
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"math"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pkg/errors"
 
@@ -31,10 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
-	"k8s.io/kubernetes/cmd/kubeadm/app/util/kustomize"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/patches"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/users"
 )
 
 const (
@@ -45,8 +49,15 @@ const (
 	kubeSchedulerBindAddressArg = "bind-address"
 )
 
-// ComponentPod returns a Pod object from the container and volume specifications
-func ComponentPod(container v1.Container, volumes map[string]v1.Volume) v1.Pod {
+var (
+	usersAndGroups     *users.UsersAndGroups
+	usersAndGroupsOnce sync.Once
+)
+
+// ComponentPod returns a Pod object from the container, volume and annotations specifications
+func ComponentPod(container v1.Container, volumes map[string]v1.Volume, annotations map[string]string) v1.Pod {
+	// priority value for system-node-critical class
+	priority := int32(2000001000)
 	return v1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -57,13 +68,20 @@ func ComponentPod(container v1.Container, volumes map[string]v1.Volume) v1.Pod {
 			Namespace: metav1.NamespaceSystem,
 			// The component and tier labels are useful for quickly identifying the control plane Pods when doing a .List()
 			// against Pods in the kube-system namespace. Can for example be used together with the WaitForPodsWithLabel function
-			Labels: map[string]string{"component": container.Name, "tier": "control-plane"},
+			Labels:      map[string]string{"component": container.Name, "tier": kubeadmconstants.ControlPlaneTier},
+			Annotations: annotations,
 		},
 		Spec: v1.PodSpec{
 			Containers:        []v1.Container{container},
-			PriorityClassName: "system-cluster-critical",
+			Priority:          &priority,
+			PriorityClassName: "system-node-critical",
 			HostNetwork:       true,
 			Volumes:           VolumeMapToSlice(volumes),
+			SecurityContext: &v1.PodSecurityContext{
+				SeccompProfile: &v1.SeccompProfile{
+					Type: v1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
 		},
 	}
 }
@@ -145,33 +163,36 @@ func GetExtraParameters(overrides map[string]string, defaults map[string]string)
 	return command
 }
 
-// KustomizeStaticPod applies patches defined in kustomizeDir to a static Pod manifest
-func KustomizeStaticPod(pod *v1.Pod, kustomizeDir string) (*v1.Pod, error) {
-	// marshal the pod manifest into yaml
-	serialized, err := kubeadmutil.MarshalToYaml(pod, v1.SchemeGroupVersion)
+// PatchStaticPod applies patches stored in patchesDir to a static Pod.
+func PatchStaticPod(pod *v1.Pod, patchesDir string, output io.Writer) (*v1.Pod, error) {
+	// Marshal the Pod manifest into YAML.
+	podYAML, err := kubeadmutil.MarshalToYaml(pod, v1.SchemeGroupVersion)
 	if err != nil {
-		return pod, errors.Wrapf(err, "failed to marshal manifest to YAML")
+		return pod, errors.Wrapf(err, "failed to marshal Pod manifest to YAML")
 	}
 
-	km, err := kustomize.GetManager(kustomizeDir)
+	patchManager, err := patches.GetPatchManagerForPath(patchesDir, patches.KnownTargets(), output)
 	if err != nil {
-		return pod, errors.Wrapf(err, "failed to GetPatches from %q", kustomizeDir)
+		return pod, err
 	}
 
-	kustomized, err := km.Kustomize(serialized)
-	if err != nil {
-		return pod, errors.Wrap(err, "failed to kustomize static Pod manifest")
+	patchTarget := &patches.PatchTarget{
+		Name:                      pod.Name,
+		StrategicMergePatchObject: v1.Pod{},
+		Data:                      podYAML,
+	}
+	if err := patchManager.ApplyPatchesToTarget(patchTarget); err != nil {
+		return pod, err
 	}
 
-	// unmarshal kustomized yaml back into a pod manifest
-	obj, err := kubeadmutil.UnmarshalFromYaml(kustomized, v1.SchemeGroupVersion)
+	obj, err := kubeadmutil.UnmarshalFromYaml(patchTarget.Data, v1.SchemeGroupVersion)
 	if err != nil {
-		return pod, errors.Wrap(err, "failed to unmarshal kustomize manifest from YAML")
+		return pod, errors.Wrap(err, "failed to unmarshal patched manifest from YAML")
 	}
 
 	pod2, ok := obj.(*v1.Pod)
 	if !ok {
-		return pod, errors.Wrap(err, "kustomized manifest is not a valid Pod object")
+		return pod, errors.Wrap(err, "patched manifest is not a valid Pod object")
 	}
 
 	return pod2, nil
@@ -193,7 +214,7 @@ func WriteStaticPodToDisk(componentName, manifestDir string, pod v1.Pod) error {
 
 	filename := kubeadmconstants.GetStaticPodFilepath(componentName, manifestDir)
 
-	if err := ioutil.WriteFile(filename, serialized, 0600); err != nil {
+	if err := os.WriteFile(filename, serialized, 0600); err != nil {
 		return errors.Wrapf(err, "failed to write static pod manifest file for %q (%q)", componentName, filename)
 	}
 
@@ -202,7 +223,7 @@ func WriteStaticPodToDisk(componentName, manifestDir string, pod v1.Pod) error {
 
 // ReadStaticPodFromDisk reads a static pod file from disk
 func ReadStaticPodFromDisk(manifestPath string) (*v1.Pod, error) {
-	buf, err := ioutil.ReadFile(manifestPath)
+	buf, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return &v1.Pod{}, errors.Wrapf(err, "failed to read manifest for %q", manifestPath)
 	}
@@ -219,8 +240,33 @@ func ReadStaticPodFromDisk(manifestPath string) (*v1.Pod, error) {
 
 // LivenessProbe creates a Probe object with a HTTPGet handler
 func LivenessProbe(host, path string, port int, scheme v1.URIScheme) *v1.Probe {
+	// sets initialDelaySeconds same as periodSeconds to skip one period before running a check
+	return createHTTPProbe(host, path, port, scheme, 10, 15, 8, 10)
+}
+
+// ReadinessProbe creates a Probe object with a HTTPGet handler
+func ReadinessProbe(host, path string, port int, scheme v1.URIScheme) *v1.Probe {
+	// sets initialDelaySeconds as '0' because we don't want to delay user infrastructure checks
+	// looking for "ready" status on kubeadm static Pods
+	return createHTTPProbe(host, path, port, scheme, 0, 15, 3, 1)
+}
+
+// StartupProbe creates a Probe object with a HTTPGet handler
+func StartupProbe(host, path string, port int, scheme v1.URIScheme, timeoutForControlPlane *metav1.Duration) *v1.Probe {
+	periodSeconds, timeoutForControlPlaneSeconds := int32(10), kubeadmconstants.DefaultControlPlaneTimeout.Seconds()
+	if timeoutForControlPlane != nil {
+		timeoutForControlPlaneSeconds = timeoutForControlPlane.Seconds()
+	}
+	// sets failureThreshold big enough to guarantee the full timeout can cover the worst case scenario for the control-plane to come alive
+	// we ignore initialDelaySeconds in the calculation here for simplicity
+	failureThreshold := int32(math.Ceil(timeoutForControlPlaneSeconds / float64(periodSeconds)))
+	// sets initialDelaySeconds same as periodSeconds to skip one period before running a check
+	return createHTTPProbe(host, path, port, scheme, periodSeconds, 15, failureThreshold, periodSeconds)
+}
+
+func createHTTPProbe(host, path string, port int, scheme v1.URIScheme, initialDelaySeconds, timeoutSeconds, failureThreshold, periodSeconds int32) *v1.Probe {
 	return &v1.Probe{
-		Handler: v1.Handler{
+		ProbeHandler: v1.ProbeHandler{
 			HTTPGet: &v1.HTTPGetAction{
 				Host:   host,
 				Path:   path,
@@ -228,21 +274,15 @@ func LivenessProbe(host, path string, port int, scheme v1.URIScheme) *v1.Probe {
 				Scheme: scheme,
 			},
 		},
-		InitialDelaySeconds: 15,
-		TimeoutSeconds:      15,
-		FailureThreshold:    8,
+		InitialDelaySeconds: initialDelaySeconds,
+		TimeoutSeconds:      timeoutSeconds,
+		FailureThreshold:    failureThreshold,
+		PeriodSeconds:       periodSeconds,
 	}
 }
 
 // GetAPIServerProbeAddress returns the probe address for the API server
 func GetAPIServerProbeAddress(endpoint *kubeadmapi.APIEndpoint) string {
-	// In the case of a self-hosted deployment, the initial host on which kubeadm --init is run,
-	// will generate a DaemonSet with a nodeSelector such that all nodes with the label
-	// node-role.kubernetes.io/master='' will have the API server deployed to it. Since the init
-	// is run only once on an initial host, the API advertise address will be invalid for any
-	// future hosts that do not have the same address. Furthermore, since liveness and readiness
-	// probes do not support the Downward API we cannot dynamically set the advertise address to
-	// the node's IP. The only option then is to use localhost.
 	if endpoint != nil && endpoint.AdvertiseAddress != "" {
 		return getProbeAddress(endpoint.AdvertiseAddress)
 	}
@@ -310,11 +350,11 @@ func GetEtcdProbeEndpoint(cfg *kubeadmapi.Etcd, isIPv6 bool) (string, int, v1.UR
 
 // ManifestFilesAreEqual compares 2 files. It returns true if their contents are equal, false otherwise
 func ManifestFilesAreEqual(path1, path2 string) (bool, error) {
-	content1, err := ioutil.ReadFile(path1)
+	content1, err := os.ReadFile(path1)
 	if err != nil {
 		return false, err
 	}
-	content2, err := ioutil.ReadFile(path2)
+	content2, err := os.ReadFile(path2)
 	if err != nil {
 		return false, err
 	}
@@ -333,4 +373,12 @@ func getProbeAddress(addr string) string {
 		return ""
 	}
 	return addr
+}
+
+func GetUsersAndGroups() (*users.UsersAndGroups, error) {
+	var err error
+	usersAndGroupsOnce.Do(func() {
+		usersAndGroups, err = users.AddUsersAndGroups()
+	})
+	return usersAndGroups, err
 }

@@ -18,6 +18,7 @@ package dynamiccertificates
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"fmt"
 	"sync/atomic"
@@ -33,7 +34,7 @@ import (
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // ConfigMapCAController provies a CAContentProvider that can dynamically react to configmap changes
@@ -58,7 +59,6 @@ type ConfigMapCAController struct {
 	preRunCaches []cache.InformerSynced
 }
 
-var _ Notifier = &ConfigMapCAController{}
 var _ CAContentProvider = &ConfigMapCAController{}
 var _ ControllerRunner = &ConfigMapCAController{}
 
@@ -97,10 +97,7 @@ func NewDynamicCAFromConfigMapController(purpose, namespace, name, key string, k
 		queue:        workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), fmt.Sprintf("DynamicConfigMapCABundle-%s", purpose)),
 		preRunCaches: []cache.InformerSynced{uncastConfigmapInformer.HasSynced},
 	}
-	if err := c.loadCABundle(); err != nil {
-		// don't fail, but do print out a message
-		klog.Warningf("unable to load initial CA bundle for: %q due to: %s", c.name, err)
-	}
+
 	uncastConfigmapInformer.AddEventHandler(cache.FilteringResourceEventHandler{
 		FilterFunc: func(obj interface{}) bool {
 			if cast, ok := obj.(*corev1.ConfigMap); ok {
@@ -190,7 +187,7 @@ func (c *ConfigMapCAController) hasCAChanged(caBundle []byte) bool {
 }
 
 // RunOnce runs a single sync loop
-func (c *ConfigMapCAController) RunOnce() error {
+func (c *ConfigMapCAController) RunOnce(ctx context.Context) error {
 	// Ignore the error when running once because when using a dynamically loaded ca file, because we think it's better to have nothing for
 	// a brief time than completely crash.  If crashing is necessary, higher order logic like a healthcheck and cause failures.
 	_ = c.loadCABundle()
@@ -198,31 +195,31 @@ func (c *ConfigMapCAController) RunOnce() error {
 }
 
 // Run starts the kube-apiserver and blocks until stopCh is closed.
-func (c *ConfigMapCAController) Run(workers int, stopCh <-chan struct{}) {
+func (c *ConfigMapCAController) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
 
-	klog.Infof("Starting %s", c.name)
-	defer klog.Infof("Shutting down %s", c.name)
+	klog.InfoS("Starting controller", "name", c.name)
+	defer klog.InfoS("Shutting down controller", "name", c.name)
 
 	// we have a personal informer that is narrowly scoped, start it.
-	go c.configMapInformer.Run(stopCh)
+	go c.configMapInformer.Run(ctx.Done())
 
 	// wait for your secondary caches to fill before starting your work
-	if !cache.WaitForNamedCacheSync(c.name, stopCh, c.preRunCaches...) {
+	if !cache.WaitForNamedCacheSync(c.name, ctx.Done(), c.preRunCaches...) {
 		return
 	}
 
 	// doesn't matter what workers say, only start one.
-	go wait.Until(c.runWorker, time.Second, stopCh)
+	go wait.Until(c.runWorker, time.Second, ctx.Done())
 
 	// start timer that rechecks every minute, just in case.  this also serves to prime the controller quickly.
 	go wait.PollImmediateUntil(FileRefreshDuration, func() (bool, error) {
 		c.queue.Add(workItemKey)
 		return false, nil
-	}, stopCh)
+	}, ctx.Done())
 
-	<-stopCh
+	<-ctx.Done()
 }
 
 func (c *ConfigMapCAController) runWorker() {

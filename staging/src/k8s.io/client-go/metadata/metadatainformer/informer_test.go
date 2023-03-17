@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -103,7 +103,7 @@ func TestMetadataSharedInformerFactory(t *testing.T) {
 			gvr:         schema.GroupVersionResource{Group: "extensions", Version: "v1beta1", Resource: "deployments"},
 			existingObj: newPartialObjectMetadata("extensions/v1beta1", "Deployment", "ns-foo", "name-foo"),
 			trigger: func(gvr schema.GroupVersionResource, ns string, fakeClient *fake.FakeMetadataClient, testObject *metav1.PartialObjectMetadata) *metav1.PartialObjectMetadata {
-				err := fakeClient.Resource(gvr).Namespace(ns).Delete(testObject.GetName(), &metav1.DeleteOptions{})
+				err := fakeClient.Resource(gvr).Namespace(ns).Delete(context.TODO(), testObject.GetName(), metav1.DeleteOptions{})
 				if err != nil {
 					t.Error(err)
 				}
@@ -125,7 +125,7 @@ func TestMetadataSharedInformerFactory(t *testing.T) {
 			timeout := time.Duration(3 * time.Second)
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			scheme := runtime.NewScheme()
+			scheme := fake.NewTestScheme()
 			metav1.AddMetaToScheme(scheme)
 			informerReciveObjectCh := make(chan *metav1.PartialObjectMetadata, 1)
 			objs := []runtime.Object{}

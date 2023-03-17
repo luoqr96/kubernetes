@@ -20,8 +20,8 @@ limitations under the License.
 package drivers
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -49,7 +49,7 @@ func shredFile(filePath string) {
 		framework.Logf("File %v successfully shredded", filePath)
 		return
 	}
-	// Shred failed Try to remove the file for good meausure
+	// Shred failed Try to remove the file for good measure
 	err = os.Remove(filePath)
 	framework.ExpectNoError(err, "Failed to remove service account file %s", filePath)
 
@@ -78,7 +78,7 @@ func createGCESecrets(client clientset.Interface, ns string) {
 	framework.ExpectNoError(err, "error copying service account key: %s\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	defer shredFile(saFile)
 	// Create Secret with this Service Account
-	fileBytes, err := ioutil.ReadFile(saFile)
+	fileBytes, err := os.ReadFile(saFile)
 	framework.ExpectNoError(err, "Failed to read file %v", saFile)
 
 	s := &v1.Secret{
@@ -92,7 +92,7 @@ func createGCESecrets(client clientset.Interface, ns string) {
 		},
 	}
 
-	_, err = client.CoreV1().Secrets(ns).Create(s)
+	_, err = client.CoreV1().Secrets(ns).Create(context.TODO(), s, metav1.CreateOptions{})
 	if !apierrors.IsAlreadyExists(err) {
 		framework.ExpectNoError(err, "Failed to create Secret %v", s.GetName())
 	}

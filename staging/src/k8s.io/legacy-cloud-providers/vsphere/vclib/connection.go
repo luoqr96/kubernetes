@@ -30,14 +30,14 @@ import (
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/soap"
 	"k8s.io/client-go/pkg/version"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // VSphereConnection contains information for connecting to vCenter
 type VSphereConnection struct {
 	Client            *vim25.Client
 	Username          string
-	Password          string
+	Password          string `datapolicy:"password"`
 	Hostname          string
 	Port              string
 	CACert            string
@@ -65,6 +65,7 @@ func (connection *VSphereConnection) Connect(ctx context.Context) error {
 			klog.Errorf("Failed to create govmomi client. err: %+v", err)
 			return err
 		}
+		setVCenterInfoMetric(connection)
 		return nil
 	}
 	m := session.NewManager(connection.Client)
@@ -204,10 +205,11 @@ func (connection *VSphereConnection) NewClient(ctx context.Context) (*vim25.Clie
 	if err != nil {
 		return nil, err
 	}
-	if klog.V(3) {
+	klogV := klog.V(3)
+	if klogV.Enabled() {
 		s, err := session.NewManager(client).UserSession(ctx)
 		if err == nil {
-			klog.Infof("New session ID for '%s' = %s", s.UserName, s.Key)
+			klogV.Infof("New session ID for '%s' = %s", s.UserName, s.Key)
 		}
 	}
 
@@ -215,6 +217,13 @@ func (connection *VSphereConnection) NewClient(ctx context.Context) (*vim25.Clie
 		connection.RoundTripperCount = RoundTripperDefaultCount
 	}
 	client.RoundTripper = vim25.Retry(client.RoundTripper, vim25.TemporaryNetworkError(int(connection.RoundTripperCount)))
+	vcNotSupported, err := isvCenterNotSupported(client.ServiceContent.About.Version, client.ServiceContent.About.ApiVersion)
+	if err != nil {
+		klog.Errorf("failed to check if vCenter version:%v and api version: %s is supported or not. Error: %v", client.ServiceContent.About.Version, client.ServiceContent.About.ApiVersion, err)
+	}
+	if vcNotSupported {
+		klog.Warningf("vCenter version (version: %q, api verson: %q) is not supported for CSI Migration. Please consider upgrading vCenter and ESXi servers to 7.0u2 or higher for migrating vSphere volumes to CSI.", client.ServiceContent.About.Version, client.ServiceContent.About.ApiVersion)
+	}
 	return client, nil
 }
 

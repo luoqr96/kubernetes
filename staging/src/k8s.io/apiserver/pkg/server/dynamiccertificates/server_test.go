@@ -79,7 +79,7 @@ func TestServingCert(t *testing.T) {
 	}
 
 	dynamicCertificateController := NewDynamicServingCertificateController(
-		*tlsConfig,
+		tlsConfig,
 		&nullCAContent{name: "client-ca"},
 		defaultCertProvider,
 		sniCerts,
@@ -207,6 +207,8 @@ var _ CAContentProvider = &nullCAContent{}
 func (c *nullCAContent) Name() string {
 	return c.name
 }
+
+func (c *nullCAContent) AddListener(Listener) {}
 
 // CurrentCABundleContent provides ca bundle byte content
 func (c *nullCAContent) CurrentCABundleContent() (cabundle []byte) {

@@ -3,18 +3,18 @@ kind: Pod
 metadata:
   generateName: affinity-pod-
   labels:
-    foo: ""
+    color: blue
 spec:
   affinity:
     podAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
       - labelSelector:
           matchLabels:
-            foo: ""
-        topologyKey: failure-domain.beta.kubernetes.io/zone
-        namespaces: ["sched-test", "sched-setup"]
+            color: blue
+        topologyKey: topology.kubernetes.io/zone
+        namespaces: ["sched-1", "sched-0"]
   containers:
-  - image: k8s.gcr.io/pause:3.1
+  - image: registry.k8s.io/pause:3.9
     name: pause
     ports:
     - containerPort: 80

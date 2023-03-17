@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -34,7 +35,7 @@ import (
 	compute "google.golang.org/api/compute/v1"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	servicehelpers "k8s.io/cloud-provider/service/helpers"
@@ -46,6 +47,7 @@ const (
 	errPrefixGetTargetPool  = "error getting load balancer's target pool:"
 	wrongTier               = "SupremeLuxury"
 	errStrUnsupportedTier   = "unsupported network tier: \"" + wrongTier + "\""
+	fakeSvcName             = "fakesvc"
 )
 
 func fakeLoadbalancerService(lbType string) *v1.Service {
@@ -59,7 +61,7 @@ func fakeLoadBalancerServiceDeprecatedAnnotation(lbType string) *v1.Service {
 func fakeLoadbalancerServiceHelper(lbType string, annotationKey string) *v1.Service {
 	return &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "",
+			Name:        fakeSvcName,
 			Annotations: map[string]string{annotationKey: lbType},
 		},
 		Spec: v1.ServiceSpec{
@@ -71,7 +73,7 @@ func fakeLoadbalancerServiceHelper(lbType string, annotationKey string) *v1.Serv
 }
 
 var (
-	FilewallChangeMsg = fmt.Sprintf("%s %s %s", v1.EventTypeNormal, eventReasonManualChange, eventMsgFirewallChange)
+	FirewallChangeMsg = fmt.Sprintf("%s %s %s", v1.EventTypeNormal, eventReasonManualChange, eventMsgFirewallChange)
 )
 
 func createAndInsertNodes(gce *Cloud, nodeNames []string, zoneName string) ([]*v1.Node, error) {
@@ -93,6 +95,8 @@ func createAndInsertNodes(gce *Cloud, nodeNames []string, zoneName string) ([]*v
 					Tags: &compute.Tags{
 						Items: []string{name},
 					},
+					// add Instance.Zone, otherwise InstanceID() won't return a right instanceID.
+					Zone: zoneName,
 				},
 			)
 			if err != nil {
@@ -106,8 +110,8 @@ func createAndInsertNodes(gce *Cloud, nodeNames []string, zoneName string) ([]*v
 				ObjectMeta: metav1.ObjectMeta{
 					Name: name,
 					Labels: map[string]string{
-						v1.LabelHostname:          name,
-						v1.LabelZoneFailureDomain: zoneName,
+						v1.LabelHostname:              name,
+						v1.LabelFailureDomainBetaZone: zoneName,
 					},
 				},
 				Status: v1.NodeStatus{
@@ -246,6 +250,11 @@ func assertInternalLbResources(t *testing.T, gce *Cloud, apiService *v1.Service,
 	assert.Equal(t, backendServiceLink, fwdRule.BackendService)
 	// if no Subnetwork specified, defaults to the GCE NetworkURL
 	assert.Equal(t, gce.NetworkURL(), fwdRule.Subnetwork)
+
+	// Check that the IP address has been released. IP is only reserved until ensure function exits.
+	ip, err := gce.GetRegionAddress(lbName, gce.region)
+	require.Error(t, err)
+	assert.Nil(t, ip)
 }
 
 func assertInternalLbResourcesDeleted(t *testing.T, gce *Cloud, apiService *v1.Service, vals TestClusterValues, firewallsDeleted bool) {
@@ -284,6 +293,11 @@ func assertInternalLbResourcesDeleted(t *testing.T, gce *Cloud, apiService *v1.S
 	healthcheck, err := gce.GetHealthCheck(hcName)
 	require.Error(t, err)
 	assert.Nil(t, healthcheck)
+
+	// Check that the IP address has been released
+	ip, err := gce.GetRegionAddress(lbName, gce.region)
+	require.Error(t, err)
+	assert.Nil(t, ip)
 }
 
 func checkEvent(t *testing.T, recorder *record.FakeRecorder, expected string, shouldMatch bool) bool {

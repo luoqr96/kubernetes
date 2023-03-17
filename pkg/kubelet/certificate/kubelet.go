@@ -26,24 +26,26 @@ import (
 	"sort"
 	"time"
 
-	certificates "k8s.io/api/certificates/v1beta1"
+	certificates "k8s.io/api/certificates/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
-	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
 	"k8s.io/client-go/util/certificate"
 	compbasemetrics "k8s.io/component-base/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
+	netutils "k8s.io/utils/net"
 )
 
 // NewKubeletServerCertificateManager creates a certificate manager for the kubelet when retrieving a server certificate
 // or returns an error.
 func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg *kubeletconfig.KubeletConfiguration, nodeName types.NodeName, getAddresses func() []v1.NodeAddress, certDirectory string) (certificate.Manager, error) {
-	var certSigningRequestClient certificatesclient.CertificateSigningRequestInterface
-	if kubeClient != nil && kubeClient.CertificatesV1beta1() != nil {
-		certSigningRequestClient = kubeClient.CertificatesV1beta1().CertificateSigningRequests()
+	var clientsetFn certificate.ClientsetFunc
+	if kubeClient != nil {
+		clientsetFn = func(current *tls.Certificate) (clientset.Interface, error) {
+			return kubeClient, nil
+		}
 	}
 	certificateStore, err := certificate.NewFileStore(
 		"kubelet-server",
@@ -103,24 +105,10 @@ func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg 
 	}
 
 	m, err := certificate.NewManager(&certificate.Config{
-		ClientFn: func(current *tls.Certificate) (certificatesclient.CertificateSigningRequestInterface, error) {
-			return certSigningRequestClient, nil
-		},
-		GetTemplate: getTemplate,
-		Usages: []certificates.KeyUsage{
-			// https://tools.ietf.org/html/rfc5280#section-4.2.1.3
-			//
-			// Digital signature allows the certificate to be used to verify
-			// digital signatures used during TLS negotiation.
-			certificates.UsageDigitalSignature,
-			// KeyEncipherment allows the cert/key pair to be used to encrypt
-			// keys, including the symmetric keys negotiated during TLS setup
-			// and used for data transfer.
-			certificates.UsageKeyEncipherment,
-			// ServerAuth allows the cert to be used by a TLS server to
-			// authenticate itself to a TLS client.
-			certificates.UsageServerAuth,
-		},
+		ClientsetFn:             clientsetFn,
+		GetTemplate:             getTemplate,
+		SignerName:              certificates.KubeletServingSignerName,
+		GetUsages:               certificate.DefaultKubeletServingGetUsages,
 		CertificateStore:        certificateStore,
 		CertificateRotation:     certificateRotationAge,
 		CertificateRenewFailure: certificateRenewFailure,
@@ -129,7 +117,7 @@ func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg 
 		return nil, fmt.Errorf("failed to initialize server certificate manager: %v", err)
 	}
 	legacyregistry.RawMustRegister(compbasemetrics.NewGaugeFunc(
-		compbasemetrics.GaugeOpts{
+		&compbasemetrics.GaugeOpts{
 			Subsystem: metrics.KubeletSubsystem,
 			Name:      "certificate_manager_server_ttl_seconds",
 			Help: "Gauge of the shortest TTL (time-to-live) of " +
@@ -141,7 +129,7 @@ func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg 
 		},
 		func() float64 {
 			if c := m.Current(); c != nil && c.Leaf != nil {
-				return c.Leaf.NotAfter.Sub(time.Now()).Seconds()
+				return math.Trunc(time.Until(c.Leaf.NotAfter).Seconds())
 			}
 			return math.Inf(1)
 		},
@@ -159,13 +147,13 @@ func addressesToHostnamesAndIPs(addresses []v1.NodeAddress) (dnsNames []string, 
 
 		switch address.Type {
 		case v1.NodeHostName:
-			if ip := net.ParseIP(address.Address); ip != nil {
+			if ip := netutils.ParseIPSloppy(address.Address); ip != nil {
 				seenIPs[address.Address] = true
 			} else {
 				seenDNSNames[address.Address] = true
 			}
 		case v1.NodeExternalIP, v1.NodeInternalIP:
-			if ip := net.ParseIP(address.Address); ip != nil {
+			if ip := netutils.ParseIPSloppy(address.Address); ip != nil {
 				seenIPs[address.Address] = true
 			}
 		case v1.NodeExternalDNS, v1.NodeInternalDNS:
@@ -177,7 +165,7 @@ func addressesToHostnamesAndIPs(addresses []v1.NodeAddress) (dnsNames []string, 
 		dnsNames = append(dnsNames, dnsName)
 	}
 	for ip := range seenIPs {
-		ips = append(ips, net.ParseIP(ip))
+		ips = append(ips, netutils.ParseIPSloppy(ip))
 	}
 
 	// return in stable order
@@ -197,7 +185,7 @@ func NewKubeletClientCertificateManager(
 	bootstrapKeyData []byte,
 	certFile string,
 	keyFile string,
-	clientFn certificate.CSRClientFunc,
+	clientsetFn certificate.ClientsetFunc,
 ) (certificate.Manager, error) {
 
 	certificateStore, err := certificate.NewFileStore(
@@ -209,16 +197,6 @@ func NewKubeletClientCertificateManager(
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize client certificate store: %v", err)
 	}
-	var certificateExpiration = compbasemetrics.NewGauge(
-		&compbasemetrics.GaugeOpts{
-			Namespace:      metrics.KubeletSubsystem,
-			Subsystem:      "certificate_manager",
-			Name:           "client_expiration_seconds",
-			Help:           "Gauge of the lifetime of a certificate. The value is the date the certificate will expire in seconds since January 1, 1970 UTC.",
-			StabilityLevel: compbasemetrics.ALPHA,
-		},
-	)
-	legacyregistry.Register(certificateExpiration)
 	var certificateRenewFailure = compbasemetrics.NewCounter(
 		&compbasemetrics.CounterOpts{
 			Namespace:      metrics.KubeletSubsystem,
@@ -231,29 +209,15 @@ func NewKubeletClientCertificateManager(
 	legacyregistry.Register(certificateRenewFailure)
 
 	m, err := certificate.NewManager(&certificate.Config{
-		ClientFn: clientFn,
+		ClientsetFn: clientsetFn,
 		Template: &x509.CertificateRequest{
 			Subject: pkix.Name{
 				CommonName:   fmt.Sprintf("system:node:%s", nodeName),
 				Organization: []string{"system:nodes"},
 			},
 		},
-		Usages: []certificates.KeyUsage{
-			// https://tools.ietf.org/html/rfc5280#section-4.2.1.3
-			//
-			// DigitalSignature allows the certificate to be used to verify
-			// digital signatures including signatures used during TLS
-			// negotiation.
-			certificates.UsageDigitalSignature,
-			// KeyEncipherment allows the cert/key pair to be used to encrypt
-			// keys, including the symmetric keys negotiated during TLS setup
-			// and used for data transfer..
-			certificates.UsageKeyEncipherment,
-			// ClientAuth allows the cert to be used by a TLS client to
-			// authenticate itself to the TLS server.
-			certificates.UsageClientAuth,
-		},
-
+		SignerName: certificates.KubeAPIServerClientKubeletSignerName,
+		GetUsages:  certificate.DefaultKubeletClientGetUsages,
 		// For backwards compatibility, the kubelet supports the ability to
 		// provide a higher privileged certificate as initial data that will
 		// then be rotated immediately. This code path is used by kubeadm on
@@ -267,5 +231,6 @@ func NewKubeletClientCertificateManager(
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize client certificate manager: %v", err)
 	}
+
 	return m, nil
 }

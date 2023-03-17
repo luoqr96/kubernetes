@@ -1,3 +1,4 @@
+//go:build freebsd || linux || darwin
 // +build freebsd linux darwin
 
 /*
@@ -19,7 +20,6 @@ limitations under the License.
 package util
 
 import (
-	"io/ioutil"
 	"net"
 	"os"
 	"testing"
@@ -101,7 +101,7 @@ func TestIsUnixDomainSocket(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		f, err := ioutil.TempFile("", "test-domain-socket")
+		f, err := os.CreateTemp("", "test-domain-socket")
 		require.NoErrorf(t, err, "Failed to create file for test purposes: %v while setting up: %s", err, test.label)
 		addr := f.Name()
 		f.Close()
@@ -131,5 +131,76 @@ func TestIsUnixDomainSocket(t *testing.T) {
 			assert.Nil(t, err, "Unexpected error invoking IsUnixDomainSocket for %s", test.label)
 		}
 		assert.Equal(t, result, test.expectSocket, "Unexpected result from IsUnixDomainSocket: %v for %s", result, test.label)
+	}
+}
+
+func TestGetAddressAndDialer(t *testing.T) {
+	tests := []struct {
+		endpoint     string
+		expectError  bool
+		expectedAddr string
+	}{
+		{
+			endpoint:     "unix:///tmp/s1.sock",
+			expectError:  false,
+			expectedAddr: "/tmp/s1.sock",
+		},
+		{
+			endpoint:     "unix:///tmp/f6.sock",
+			expectError:  false,
+			expectedAddr: "/tmp/f6.sock",
+		},
+		{
+			endpoint:    "tcp://localhost:9090",
+			expectError: true,
+		},
+		{
+			// The misspelling is intentional to make it error
+			endpoint:    "htta://free-test.com",
+			expectError: true,
+		},
+		{
+			endpoint:    "https://www.youtube.com/",
+			expectError: true,
+		},
+		{
+			endpoint:    "http://www.baidu.com/",
+			expectError: true,
+		},
+	}
+	for _, test := range tests {
+		// just test addr and err
+		addr, _, err := GetAddressAndDialer(test.endpoint)
+		if test.expectError {
+			assert.NotNil(t, err, "expected error during parsing %s", test.endpoint)
+			continue
+		}
+		assert.Nil(t, err, "expected no error during parsing %s", test.endpoint)
+		assert.Equal(t, test.expectedAddr, addr)
+	}
+}
+
+func TestLocalEndpoint(t *testing.T) {
+	tests := []struct {
+		path             string
+		file             string
+		expectError      bool
+		expectedFullPath string
+	}{
+		{
+			path:             "path",
+			file:             "file",
+			expectError:      false,
+			expectedFullPath: "unix:/path/file.sock",
+		},
+	}
+	for _, test := range tests {
+		fullPath, err := LocalEndpoint(test.path, test.file)
+		if test.expectError {
+			assert.NotNil(t, err, "expected error")
+			continue
+		}
+		assert.Nil(t, err, "expected no error")
+		assert.Equal(t, test.expectedFullPath, fullPath)
 	}
 }

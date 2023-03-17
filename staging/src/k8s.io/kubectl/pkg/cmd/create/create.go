@@ -17,6 +17,7 @@ limitations under the License.
 package create
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/url"
@@ -24,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,7 +51,11 @@ type CreateOptions struct {
 	PrintFlags  *genericclioptions.PrintFlags
 	RecordFlags *genericclioptions.RecordFlags
 
-	DryRun bool
+	DryRunStrategy cmdutil.DryRunStrategy
+
+	ValidationDirective string
+
+	fieldManager string
 
 	FilenameOptions  resource.FilenameOptions
 	Selector         string
@@ -70,14 +75,14 @@ var (
 		JSON and YAML formats are accepted.`))
 
 	createExample = templates.Examples(i18n.T(`
-		# Create a pod using the data in pod.json.
+		# Create a pod using the data in pod.json
 		kubectl create -f ./pod.json
 
-		# Create a pod based on the JSON passed into stdin.
+		# Create a pod based on the JSON passed into stdin
 		cat pod.json | kubectl create -f -
 
-		# Edit the data in docker-registry.yaml in JSON then create the resource using the edited data.
-		kubectl create -f docker-registry.yaml --edit -o json`))
+		# Edit the data in registry.yaml in JSON then create the resource using the edited data
+		kubectl create -f registry.yaml --edit -o json`))
 )
 
 // NewCreateOptions returns an initialized CreateOptions instance
@@ -99,7 +104,7 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	cmd := &cobra.Command{
 		Use:                   "create -f FILENAME",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Create a resource from a file or from stdin."),
+		Short:                 i18n.T("Create a resource from a file or from stdin"),
 		Long:                  createLong,
 		Example:               createExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -109,8 +114,8 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 				defaultRunFunc(cmd, args)
 				return
 			}
-			cmdutil.CheckErr(o.Complete(f, cmd))
-			cmdutil.CheckErr(o.ValidateArgs(cmd, args))
+			cmdutil.CheckErr(o.Complete(f, cmd, args))
+			cmdutil.CheckErr(o.Validate())
 			cmdutil.CheckErr(o.RunCreate(f, cmd))
 		},
 	}
@@ -126,8 +131,9 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 		"Only relevant if --edit=true. Defaults to the line ending native to your platform.")
 	cmdutil.AddApplyAnnotationFlags(cmd)
 	cmdutil.AddDryRunFlag(cmd)
-	cmd.Flags().StringVarP(&o.Selector, "selector", "l", o.Selector, "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
+	cmdutil.AddLabelSelectorFlagVar(cmd, &o.Selector)
 	cmd.Flags().StringVar(&o.Raw, "raw", o.Raw, "Raw URI to POST to the server.  Uses the transport specified by the kubeconfig file.")
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-create")
 
 	o.PrintFlags.AddFlags(cmd)
 
@@ -147,35 +153,34 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	cmd.AddCommand(NewCmdCreatePriorityClass(f, ioStreams))
 	cmd.AddCommand(NewCmdCreateJob(f, ioStreams))
 	cmd.AddCommand(NewCmdCreateCronJob(f, ioStreams))
+	cmd.AddCommand(NewCmdCreateIngress(f, ioStreams))
+	cmd.AddCommand(NewCmdCreateToken(f, ioStreams))
 	return cmd
 }
 
-// ValidateArgs makes sure there is no discrepency in command options
-func (o *CreateOptions) ValidateArgs(cmd *cobra.Command, args []string) error {
-	if len(args) != 0 {
-		return cmdutil.UsageErrorf(cmd, "Unexpected args: %v", args)
-	}
+// Validate makes sure there is no discrepency in command options
+func (o *CreateOptions) Validate() error {
 	if len(o.Raw) > 0 {
 		if o.EditBeforeCreate {
-			return cmdutil.UsageErrorf(cmd, "--raw and --edit are mutually exclusive")
+			return fmt.Errorf("--raw and --edit are mutually exclusive")
 		}
 		if len(o.FilenameOptions.Filenames) != 1 {
-			return cmdutil.UsageErrorf(cmd, "--raw can only use a single local file or stdin")
+			return fmt.Errorf("--raw can only use a single local file or stdin")
 		}
 		if strings.Index(o.FilenameOptions.Filenames[0], "http://") == 0 || strings.Index(o.FilenameOptions.Filenames[0], "https://") == 0 {
-			return cmdutil.UsageErrorf(cmd, "--raw cannot read from a url")
+			return fmt.Errorf("--raw cannot read from a url")
 		}
 		if o.FilenameOptions.Recursive {
-			return cmdutil.UsageErrorf(cmd, "--raw and --recursive are mutually exclusive")
+			return fmt.Errorf("--raw and --recursive are mutually exclusive")
 		}
 		if len(o.Selector) > 0 {
-			return cmdutil.UsageErrorf(cmd, "--raw and --selector (-l) are mutually exclusive")
+			return fmt.Errorf("--raw and --selector (-l) are mutually exclusive")
 		}
-		if len(cmdutil.GetFlagString(cmd, "output")) > 0 {
-			return cmdutil.UsageErrorf(cmd, "--raw and --output are mutually exclusive")
+		if o.PrintFlags.OutputFormat != nil && len(*o.PrintFlags.OutputFormat) > 0 {
+			return fmt.Errorf("--raw and --output are mutually exclusive")
 		}
 		if _, err := url.ParseRequestURI(o.Raw); err != nil {
-			return cmdutil.UsageErrorf(cmd, "--raw must be a valid URL path: %v", err)
+			return fmt.Errorf("--raw must be a valid URL path: %v", err)
 		}
 	}
 
@@ -183,7 +188,10 @@ func (o *CreateOptions) ValidateArgs(cmd *cobra.Command, args []string) error {
 }
 
 // Complete completes all the required options
-func (o *CreateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) error {
+func (o *CreateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
+	if len(args) != 0 {
+		return cmdutil.UsageErrorf(cmd, "Unexpected args: %v", args)
+	}
 	var err error
 	o.RecordFlags.Complete(cmd)
 	o.Recorder, err = o.RecordFlags.ToRecorder()
@@ -191,11 +199,17 @@ func (o *CreateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) error {
 		return err
 	}
 
-	o.DryRun = cmdutil.GetDryRunFlag(cmd)
-
-	if o.DryRun {
-		o.PrintFlags.Complete("%s (dry run)")
+	o.DryRunStrategy, err = cmdutil.GetDryRunStrategy(cmd)
+	if err != nil {
+		return err
 	}
+	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
+
+	o.ValidationDirective, err = cmdutil.GetValidationDirective(cmd)
+	if err != nil {
+		return err
+	}
+
 	printer, err := o.PrintFlags.ToPrinter()
 	if err != nil {
 		return err
@@ -221,9 +235,10 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	}
 
 	if o.EditBeforeCreate {
-		return RunEditOnCreate(f, o.PrintFlags, o.RecordFlags, o.IOStreams, cmd, &o.FilenameOptions)
+		return RunEditOnCreate(f, o.PrintFlags, o.RecordFlags, o.IOStreams, cmd, &o.FilenameOptions, o.fieldManager)
 	}
-	schema, err := f.Validator(cmdutil.GetFlagBool(cmd, "validate"))
+
+	schema, err := f.Validator(o.ValidationDirective)
 	if err != nil {
 		return err
 	}
@@ -260,10 +275,17 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 			klog.V(4).Infof("error recording current command: %v", err)
 		}
 
-		if !o.DryRun {
-			if err := createAndRefresh(info); err != nil {
+		if o.DryRunStrategy != cmdutil.DryRunClient {
+			obj, err := resource.
+				NewHelper(info.Client, info.Mapping).
+				DryRun(o.DryRunStrategy == cmdutil.DryRunServer).
+				WithFieldManager(o.fieldManager).
+				WithFieldValidation(o.ValidationDirective).
+				Create(info.Namespace, true, info.Object)
+			if err != nil {
 				return cmdutil.AddSourceToErr("creating", info.Source, err)
 			}
+			info.Refresh(obj, true)
 		}
 
 		count++
@@ -280,31 +302,26 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 }
 
 // RunEditOnCreate performs edit on creation
-func RunEditOnCreate(f cmdutil.Factory, printFlags *genericclioptions.PrintFlags, recordFlags *genericclioptions.RecordFlags, ioStreams genericclioptions.IOStreams, cmd *cobra.Command, options *resource.FilenameOptions) error {
+func RunEditOnCreate(f cmdutil.Factory, printFlags *genericclioptions.PrintFlags, recordFlags *genericclioptions.RecordFlags, ioStreams genericclioptions.IOStreams, cmd *cobra.Command, options *resource.FilenameOptions, fieldManager string) error {
 	editOptions := editor.NewEditOptions(editor.EditBeforeCreateMode, ioStreams)
 	editOptions.FilenameOptions = *options
+	validationDirective, err := cmdutil.GetValidationDirective(cmd)
+	if err != nil {
+		return err
+	}
 	editOptions.ValidateOptions = cmdutil.ValidateOptions{
-		EnableValidation: cmdutil.GetFlagBool(cmd, "validate"),
+		ValidationDirective: string(validationDirective),
 	}
 	editOptions.PrintFlags = printFlags
 	editOptions.ApplyAnnotation = cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag)
 	editOptions.RecordFlags = recordFlags
+	editOptions.FieldManager = "kubectl-create"
 
-	err := editOptions.Complete(f, []string{}, cmd)
+	err = editOptions.Complete(f, []string{}, cmd)
 	if err != nil {
 		return err
 	}
 	return editOptions.Run()
-}
-
-// createAndRefresh creates an object from input info and refreshes info with that object
-func createAndRefresh(info *resource.Info) error {
-	obj, err := resource.NewHelper(info.Client, info.Mapping).Create(info.Namespace, true, info.Object, nil)
-	if err != nil {
-		return err
-	}
-	info.Refresh(obj, true)
-	return nil
 }
 
 // NameFromCommandArgs is a utility function for commands that assume the first argument is a resource name
@@ -328,9 +345,10 @@ type CreateSubcommandOptions struct {
 	Name string
 	// StructuredGenerator is the resource generator for the object being created
 	StructuredGenerator generate.StructuredGenerator
-	// DryRun is true if the command should be simulated but not run against the server
-	DryRun           bool
-	CreateAnnotation bool
+	DryRunStrategy      cmdutil.DryRunStrategy
+	CreateAnnotation    bool
+	FieldManager        string
+	ValidationDirective string
 
 	Namespace        string
 	EnforceNamespace bool
@@ -360,13 +378,19 @@ func (o *CreateSubcommandOptions) Complete(f cmdutil.Factory, cmd *cobra.Command
 
 	o.Name = name
 	o.StructuredGenerator = generator
-	o.DryRun = cmdutil.GetDryRunFlag(cmd)
+	o.DryRunStrategy, err = cmdutil.GetDryRunStrategy(cmd)
+	if err != nil {
+		return err
+	}
 	o.CreateAnnotation = cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag)
 
-	if o.DryRun {
-		o.PrintFlags.Complete("%s (dry run)")
-	}
+	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
 	printer, err := o.PrintFlags.ToPrinter()
+	if err != nil {
+		return err
+	}
+
+	o.ValidationDirective, err = cmdutil.GetValidationDirective(cmd)
 	if err != nil {
 		return err
 	}
@@ -399,7 +423,10 @@ func (o *CreateSubcommandOptions) Run() error {
 	if err != nil {
 		return err
 	}
-	if !o.DryRun {
+	if err := util.CreateOrUpdateAnnotation(o.CreateAnnotation, obj, scheme.DefaultJSONEncoder()); err != nil {
+		return err
+	}
+	if o.DryRunStrategy != cmdutil.DryRunClient {
 		// create subcommands have compiled knowledge of things they create, so type them directly
 		gvks, _, err := scheme.Scheme.ObjectKinds(obj)
 		if err != nil {
@@ -411,19 +438,23 @@ func (o *CreateSubcommandOptions) Run() error {
 			return err
 		}
 
-		if err := util.CreateOrUpdateAnnotation(o.CreateAnnotation, obj, scheme.DefaultJSONEncoder()); err != nil {
-			return err
-		}
-
 		asUnstructured := &unstructured.Unstructured{}
-
 		if err := scheme.Scheme.Convert(obj, asUnstructured, nil); err != nil {
 			return err
 		}
 		if mapping.Scope.Name() == meta.RESTScopeNameRoot {
 			o.Namespace = ""
 		}
-		actualObject, err := o.DynamicClient.Resource(mapping.Resource).Namespace(o.Namespace).Create(asUnstructured, metav1.CreateOptions{})
+		createOptions := metav1.CreateOptions{}
+		if o.FieldManager != "" {
+			createOptions.FieldManager = o.FieldManager
+		}
+		createOptions.FieldValidation = o.ValidationDirective
+
+		if o.DryRunStrategy == cmdutil.DryRunServer {
+			createOptions.DryRun = []string{metav1.DryRunAll}
+		}
+		actualObject, err := o.DynamicClient.Resource(mapping.Resource).Namespace(o.Namespace).Create(context.TODO(), asUnstructured, createOptions)
 		if err != nil {
 			return err
 		}

@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -20,8 +21,9 @@ package e2enode
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -34,26 +36,26 @@ import (
 	cadvisorclient "github.com/google/cadvisor/client/v2"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
-	kubeletstatsv1alpha1 "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
+	kubeletstatsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	"k8s.io/kubernetes/pkg/util/procfs"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	"k8s.io/kubernetes/test/e2e_node/perftype"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
 
 const (
 	// resource monitoring
-	cadvisorImageName = "google/cadvisor:latest"
+	cadvisorImageName = "gcr.io/cadvisor/cadvisor:v0.43.0"
 	cadvisorPodName   = "cadvisor"
 	cadvisorPort      = 8090
 	// housekeeping interval of Cadvisor (second)
@@ -92,7 +94,7 @@ func (r *ResourceCollector) Start() {
 	// Get the cgroup container names for kubelet and runtime
 	kubeletContainer, err1 := getContainerNameForProcess(kubeletProcessName, "")
 	runtimeContainer, err2 := getContainerNameForProcess(framework.TestContext.ContainerRuntimeProcessName, framework.TestContext.ContainerRuntimePidFile)
-	if err1 == nil && err2 == nil {
+	if err1 == nil && err2 == nil && kubeletContainer != "" && runtimeContainer != "" {
 		systemContainers = map[string]string{
 			kubeletstatsv1alpha1.SystemContainerKubelet: kubeletContainer,
 			kubeletstatsv1alpha1.SystemContainerRuntime: runtimeContainer,
@@ -367,20 +369,22 @@ func getCadvisorPod() *v1.Pod {
 }
 
 // deletePodsSync deletes a list of pods and block until pods disappear.
-func deletePodsSync(f *framework.Framework, pods []*v1.Pod) {
+func deletePodsSync(ctx context.Context, f *framework.Framework, pods []*v1.Pod) {
 	var wg sync.WaitGroup
-	for _, pod := range pods {
+	for i := range pods {
+		pod := pods[i]
 		wg.Add(1)
-		go func(pod *v1.Pod) {
+		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
 
-			err := f.PodClient().Delete(pod.ObjectMeta.Name, metav1.NewDeleteOptions(30))
-			framework.ExpectNoError(err)
+			err := e2epod.NewPodClient(f).Delete(ctx, pod.ObjectMeta.Name, *metav1.NewDeleteOptions(30))
+			if apierrors.IsNotFound(err) {
+				framework.Failf("Unexpected error trying to delete pod %s: %v", pod.Name, err)
+			}
 
-			gomega.Expect(e2epod.WaitForPodToDisappear(f.ClientSet, f.Namespace.Name, pod.ObjectMeta.Name, labels.Everything(),
-				30*time.Second, 10*time.Minute)).NotTo(gomega.HaveOccurred())
-		}(pod)
+			framework.ExpectNoError(e2epod.WaitForPodNotFoundInNamespace(ctx, f.ClientSet, pod.ObjectMeta.Name, f.Namespace.Name, 10*time.Minute))
+		}()
 	}
 	wg.Wait()
 	return
@@ -476,18 +480,18 @@ func getPidsForProcess(name, pidFile string) ([]int, error) {
 func getPidFromPidFile(pidFile string) (int, error) {
 	file, err := os.Open(pidFile)
 	if err != nil {
-		return 0, fmt.Errorf("error opening pid file %s: %v", pidFile, err)
+		return 0, fmt.Errorf("error opening pid file %s: %w", pidFile, err)
 	}
 	defer file.Close()
 
-	data, err := ioutil.ReadAll(file)
+	data, err := io.ReadAll(file)
 	if err != nil {
-		return 0, fmt.Errorf("error reading pid file %s: %v", pidFile, err)
+		return 0, fmt.Errorf("error reading pid file %s: %w", pidFile, err)
 	}
 
 	pid, err := strconv.Atoi(string(data))
 	if err != nil {
-		return 0, fmt.Errorf("error parsing %s as a number: %v", string(data), err)
+		return 0, fmt.Errorf("error parsing %s as a number: %w", string(data), err)
 	}
 
 	return pid, nil
@@ -515,6 +519,14 @@ func getContainer(pid int) (string, error) {
 	cgs, err := cgroups.ParseCgroupFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
 		return "", err
+	}
+
+	if cgroups.IsCgroup2UnifiedMode() {
+		unified, found := cgs[""]
+		if !found {
+			return "", cgroups.NewNotFoundError("unified")
+		}
+		return unified, nil
 	}
 
 	cpu, found := cgs["cpu"]

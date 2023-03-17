@@ -27,8 +27,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
+	netutils "k8s.io/utils/net"
+
+	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
-	pkiutil "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 	testutil "k8s.io/kubernetes/cmd/kubeadm/test"
 )
 
@@ -79,15 +82,27 @@ func TestPKICertificateReadWriter(t *testing.T) {
 }
 
 func TestKubeconfigReadWriter(t *testing.T) {
-	// creates a tmp folder
-	dir := testutil.SetupTempDir(t)
-	defer os.RemoveAll(dir)
+	// creates tmp folders
+	dirKubernetes := testutil.SetupTempDir(t)
+	defer os.RemoveAll(dirKubernetes)
+	dirPKI := testutil.SetupTempDir(t)
+	defer os.RemoveAll(dirPKI)
+
+	// write the CA cert and key to the temporary PKI dir
+	caName := kubeadmconstants.CACertAndKeyBaseName
+	if err := pkiutil.WriteCertAndKey(
+		dirPKI,
+		caName,
+		testCACert,
+		testCAKey); err != nil {
+		t.Fatalf("couldn't write out certificate %s to %s", caName, dirPKI)
+	}
 
 	// creates a certificate and then embeds it into a kubeconfig file
-	cert := writeTestKubeconfig(t, dir, "test", testCACert, testCAKey)
+	cert := writeTestKubeconfig(t, dirKubernetes, "test", testCACert, testCAKey)
 
 	// Creates a KubeconfigReadWriter
-	kubeconfigReadWriter := newKubeconfigReadWriter(dir, "test")
+	kubeconfigReadWriter := newKubeconfigReadWriter(dirKubernetes, "test", dirPKI, caName)
 
 	// Reads the certificate embedded in a kubeconfig
 	readCert, err := kubeconfigReadWriter.Read()
@@ -111,6 +126,11 @@ func TestKubeconfigReadWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("couldn't write new embedded certificate: %v", err)
 	}
+
+	// Make sure that CA key is not present during Read() as it is not needed.
+	// This covers testing when the CA is external and not present on the host.
+	_, caKeyPath := pkiutil.PathsForCertAndKey(dirPKI, caName)
+	os.Remove(caKeyPath)
 
 	// Reads back the new certificate embedded in a kubeconfig writer
 	readCert, err = kubeconfigReadWriter.Read()
@@ -141,13 +161,15 @@ func writeTestCertificate(t *testing.T, dir, name string, caCert *x509.Certifica
 // writeTestKubeconfig is a utility for creating a test kubeconfig with an embedded certificate
 func writeTestKubeconfig(t *testing.T, dir, name string, caCert *x509.Certificate, caKey crypto.Signer) *x509.Certificate {
 
-	cfg := &certutil.Config{
-		CommonName:   "test-common-name",
-		Organization: []string{"sig-cluster-lifecycle"},
-		Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		AltNames: certutil.AltNames{
-			IPs:      []net.IP{net.ParseIP("10.100.0.1")},
-			DNSNames: []string{"test-domain.space"},
+	cfg := &pkiutil.CertConfig{
+		Config: certutil.Config{
+			CommonName:   "test-common-name",
+			Organization: []string{"sig-cluster-lifecycle"},
+			Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			AltNames: certutil.AltNames{
+				IPs:      []net.IP{netutils.ParseIPSloppy("10.100.0.1")},
+				DNSNames: []string{"test-domain.space"},
+			},
 		},
 	}
 	cert, key, err := pkiutil.NewCertAndKey(caCert, caKey, cfg)

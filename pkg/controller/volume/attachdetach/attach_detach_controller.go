@@ -23,9 +23,9 @@ import (
 	"net"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 	utilexec "k8s.io/utils/exec"
-	"k8s.io/utils/mount"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
@@ -37,13 +37,11 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	storageinformersv1 "k8s.io/client-go/informers/storage/v1"
-	storageinformers "k8s.io/client-go/informers/storage/v1beta1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
-	storagelisters "k8s.io/client-go/listers/storage/v1beta1"
 	kcache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -55,8 +53,10 @@ import (
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/reconciler"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/statusupdater"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/util"
-	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/controller/volume/common"
+	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/pkg/volume/csi"
 	"k8s.io/kubernetes/pkg/volume/csimigration"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/operationexecutor"
@@ -111,48 +111,47 @@ func NewAttachDetachController(
 	pvcInformer coreinformers.PersistentVolumeClaimInformer,
 	pvInformer coreinformers.PersistentVolumeInformer,
 	csiNodeInformer storageinformersv1.CSINodeInformer,
-	csiDriverInformer storageinformers.CSIDriverInformer,
+	csiDriverInformer storageinformersv1.CSIDriverInformer,
+	volumeAttachmentInformer storageinformersv1.VolumeAttachmentInformer,
 	cloud cloudprovider.Interface,
 	plugins []volume.VolumePlugin,
 	prober volume.DynamicPluginProber,
 	disableReconciliationSync bool,
 	reconcilerSyncDuration time.Duration,
-	timerConfig TimerConfig) (AttachDetachController, error) {
+	timerConfig TimerConfig,
+	filteredDialOptions *proxyutil.FilteredDialOptions) (AttachDetachController, error) {
 
 	adc := &attachDetachController{
-		kubeClient:  kubeClient,
-		pvcLister:   pvcInformer.Lister(),
-		pvcsSynced:  pvcInformer.Informer().HasSynced,
-		pvLister:    pvInformer.Lister(),
-		pvsSynced:   pvInformer.Informer().HasSynced,
-		podLister:   podInformer.Lister(),
-		podsSynced:  podInformer.Informer().HasSynced,
-		podIndexer:  podInformer.Informer().GetIndexer(),
-		nodeLister:  nodeInformer.Lister(),
-		nodesSynced: nodeInformer.Informer().HasSynced,
-		cloud:       cloud,
-		pvcQueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcs"),
+		kubeClient:          kubeClient,
+		pvcLister:           pvcInformer.Lister(),
+		pvcsSynced:          pvcInformer.Informer().HasSynced,
+		pvLister:            pvInformer.Lister(),
+		pvsSynced:           pvInformer.Informer().HasSynced,
+		podLister:           podInformer.Lister(),
+		podsSynced:          podInformer.Informer().HasSynced,
+		podIndexer:          podInformer.Informer().GetIndexer(),
+		nodeLister:          nodeInformer.Lister(),
+		nodesSynced:         nodeInformer.Informer().HasSynced,
+		cloud:               cloud,
+		pvcQueue:            workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcs"),
+		filteredDialOptions: filteredDialOptions,
 	}
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) &&
-		utilfeature.DefaultFeatureGate.Enabled(features.CSINodeInfo) {
-		adc.csiNodeLister = csiNodeInformer.Lister()
-		adc.csiNodeSynced = csiNodeInformer.Informer().HasSynced
-	}
+	adc.csiNodeLister = csiNodeInformer.Lister()
+	adc.csiNodeSynced = csiNodeInformer.Informer().HasSynced
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSIDriverRegistry) {
-		adc.csiDriverLister = csiDriverInformer.Lister()
-		adc.csiDriversSynced = csiDriverInformer.Informer().HasSynced
-	}
+	adc.csiDriverLister = csiDriverInformer.Lister()
+	adc.csiDriversSynced = csiDriverInformer.Informer().HasSynced
+
+	adc.volumeAttachmentLister = volumeAttachmentInformer.Lister()
+	adc.volumeAttachmentSynced = volumeAttachmentInformer.Informer().HasSynced
 
 	if err := adc.volumePluginMgr.InitPlugins(plugins, prober, adc); err != nil {
-		return nil, fmt.Errorf("Could not initialize volume plugins for Attach/Detach Controller: %+v", err)
+		return nil, fmt.Errorf("could not initialize volume plugins for Attach/Detach Controller: %w", err)
 	}
 
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(klog.Infof)
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "attachdetach-controller"})
+	adc.broadcaster = record.NewBroadcaster()
+	recorder := adc.broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "attachdetach-controller"})
 	blkutil := volumepathhandler.NewBlockVolumePathHandler()
 
 	adc.desiredStateOfWorld = cache.NewDesiredStateOfWorld(&adc.volumePluginMgr)
@@ -162,7 +161,6 @@ func NewAttachDetachController(
 			kubeClient,
 			&adc.volumePluginMgr,
 			recorder,
-			false, // flag for experimental binary check for volume mount
 			blkutil))
 	adc.nodeStatusUpdater = statusupdater.NewNodeStatusUpdater(
 		kubeClient, nodeInformer.Lister(), adc.actualStateOfWorld)
@@ -177,11 +175,12 @@ func NewAttachDetachController(
 		adc.actualStateOfWorld,
 		adc.attacherDetacher,
 		adc.nodeStatusUpdater,
+		adc.nodeLister,
 		recorder)
 
 	csiTranslator := csitrans.New()
 	adc.intreeToCSITranslator = csiTranslator
-	adc.csiMigratedPluginManager = csimigration.NewPluginManager(csiTranslator)
+	adc.csiMigratedPluginManager = csimigration.NewPluginManager(csiTranslator, utilfeature.DefaultFeatureGate)
 
 	adc.desiredStateOfWorldPopulator = populator.NewDesiredStateOfWorldPopulator(
 		timerConfig.DesiredStateOfWorldPopulatorLoopSleepPeriod,
@@ -202,11 +201,8 @@ func NewAttachDetachController(
 
 	// This custom indexer will index pods by its PVC keys. Then we don't need
 	// to iterate all pods every time to find pods which reference given PVC.
-	err := adc.podIndexer.AddIndexers(kcache.Indexers{
-		pvcKeyIndex: indexByPVCKey,
-	})
-	if err != nil {
-		klog.Warningf("adding indexer got %v", err)
+	if err := common.AddPodPVCIndexerIfNotPresent(adc.podIndexer); err != nil {
+		return nil, fmt.Errorf("could not initialize attach detach controller: %w", err)
 	}
 
 	nodeInformer.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
@@ -225,30 +221,6 @@ func NewAttachDetachController(
 	})
 
 	return adc, nil
-}
-
-const (
-	pvcKeyIndex string = "pvcKey"
-)
-
-// indexByPVCKey returns PVC keys for given pod. Note that the index is only
-// used for attaching, so we are only interested in active pods with nodeName
-// set.
-func indexByPVCKey(obj interface{}) ([]string, error) {
-	pod, ok := obj.(*v1.Pod)
-	if !ok {
-		return []string{}, nil
-	}
-	if len(pod.Spec.NodeName) == 0 || volumeutil.IsPodTerminated(pod, pod.Status) {
-		return []string{}, nil
-	}
-	keys := []string{}
-	for _, podVolume := range pod.Spec.Volumes {
-		if pvcSource := podVolume.VolumeSource.PersistentVolumeClaim; pvcSource != nil {
-			keys = append(keys, fmt.Sprintf("%s/%s", pod.Namespace, pvcSource.ClaimName))
-		}
-	}
-	return keys, nil
 }
 
 type attachDetachController struct {
@@ -281,8 +253,14 @@ type attachDetachController struct {
 	// csiDriverLister is the shared CSIDriver lister used to fetch and store
 	// CSIDriver objects from the API server. It is shared with other controllers
 	// and therefore the CSIDriver objects in its store should be treated as immutable.
-	csiDriverLister  storagelisters.CSIDriverLister
+	csiDriverLister  storagelistersv1.CSIDriverLister
 	csiDriversSynced kcache.InformerSynced
+
+	// volumeAttachmentLister is the shared volumeAttachment lister used to fetch and store
+	// VolumeAttachment objects from the API server. It is shared with other controllers
+	// and therefore the VolumeAttachment objects in its store should be treated as immutable.
+	volumeAttachmentLister storagelistersv1.VolumeAttachmentLister
+	volumeAttachmentSynced kcache.InformerSynced
 
 	// cloud provider used by volume host
 	cloud cloudprovider.Interface
@@ -322,8 +300,8 @@ type attachDetachController struct {
 	// populate the current pods using podInformer.
 	desiredStateOfWorldPopulator populator.DesiredStateOfWorldPopulator
 
-	// recorder is used to record events in the API server
-	recorder record.EventRecorder
+	// broadcaster is broadcasting events
+	broadcaster record.EventBroadcaster
 
 	// pvcQueue is used to queue pvc objects
 	pvcQueue workqueue.RateLimitingInterface
@@ -333,11 +311,19 @@ type attachDetachController struct {
 
 	// intreeToCSITranslator translates from in-tree volume specs to CSI
 	intreeToCSITranslator csimigration.InTreeToCSITranslator
+
+	// filteredDialOptions configures any dialing done by the controller.
+	filteredDialOptions *proxyutil.FilteredDialOptions
 }
 
 func (adc *attachDetachController) Run(stopCh <-chan struct{}) {
 	defer runtime.HandleCrash()
 	defer adc.pvcQueue.ShutDown()
+
+	// Start events processing pipeline.
+	adc.broadcaster.StartStructuredLogging(0)
+	adc.broadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: adc.kubeClient.CoreV1().Events("")})
+	defer adc.broadcaster.Shutdown()
 
 	klog.Infof("Starting attach detach controller")
 	defer klog.Infof("Shutting down attach detach controller")
@@ -348,6 +334,9 @@ func (adc *attachDetachController) Run(stopCh <-chan struct{}) {
 	}
 	if adc.csiDriversSynced != nil {
 		synced = append(synced, adc.csiDriversSynced)
+	}
+	if adc.volumeAttachmentSynced != nil {
+		synced = append(synced, adc.volumeAttachmentSynced)
 	}
 
 	if !kcache.WaitForNamedCacheSync("attach detach", stopCh, synced...) {
@@ -402,7 +391,11 @@ func (adc *attachDetachController) populateActualStateOfWorld() error {
 			adc.addNodeToDswp(node, types.NodeName(node.Name))
 		}
 	}
-	return nil
+	err = adc.processVolumeAttachments()
+	if err != nil {
+		klog.Errorf("Failed to process volume attachments: %v", err)
+	}
+	return err
 }
 
 func (adc *attachDetachController) getNodeVolumeDevicePath(
@@ -442,7 +435,7 @@ func (adc *attachDetachController) populateDesiredStateOfWorld() error {
 			// The volume specs present in the ActualStateOfWorld are nil, let's replace those
 			// with the correct ones found on pods. The present in the ASW with no corresponding
 			// pod will be detached and the spec is irrelevant.
-			volumeSpec, err := util.CreateVolumeSpec(podVolume, podToAdd.Namespace, nodeName, &adc.volumePluginMgr, adc.pvcLister, adc.pvLister, adc.csiMigratedPluginManager, adc.intreeToCSITranslator)
+			volumeSpec, err := util.CreateVolumeSpec(podVolume, podToAdd, nodeName, &adc.volumePluginMgr, adc.pvcLister, adc.pvLister, adc.csiMigratedPluginManager, adc.intreeToCSITranslator)
 			if err != nil {
 				klog.Errorf(
 					"Error creating spec for volume %q, pod %q/%q: %v",
@@ -472,7 +465,12 @@ func (adc *attachDetachController) populateDesiredStateOfWorld() error {
 					err)
 				continue
 			}
-			if adc.actualStateOfWorld.IsVolumeAttachedToNode(volumeName, nodeName) {
+			attachState := adc.actualStateOfWorld.GetAttachState(volumeName, nodeName)
+			if attachState == cache.AttachStateAttached {
+				klog.V(10).Infof("Volume %q is attached to node %q. Marking as attached in ActualStateOfWorld",
+					volumeName,
+					nodeName,
+				)
 				devicePath, err := adc.getNodeVolumeDevicePath(volumeName, nodeName)
 				if err != nil {
 					klog.Errorf("Failed to find device path: %v", err)
@@ -642,13 +640,17 @@ func (adc *attachDetachController) syncPVCByKey(key string) error {
 		return nil
 	}
 
-	objs, err := adc.podIndexer.ByIndex(pvcKeyIndex, key)
+	objs, err := adc.podIndexer.ByIndex(common.PodPVCIndex, key)
 	if err != nil {
 		return err
 	}
 	for _, obj := range objs {
 		pod, ok := obj.(*v1.Pod)
 		if !ok {
+			continue
+		}
+		// we are only interested in active pods with nodeName set
+		if len(pod.Spec.NodeName) == 0 || volumeutil.IsPodTerminated(pod, pod.Status) {
 			continue
 		}
 		volumeActionFlag := util.DetermineVolumeAction(
@@ -686,6 +688,96 @@ func (adc *attachDetachController) processVolumesInUse(
 	}
 }
 
+// Process Volume-Attachment objects.
+// Should be called only after populating attached volumes in the ASW.
+// For each VA object, this function checks if its present in the ASW.
+// If not, adds the volume to ASW as an "uncertain" attachment.
+// In the reconciler, the logic checks if the volume is present in the DSW;
+//
+//	if yes, the reconciler will attempt attach on the volume;
+//	if not (could be a dangling attachment), the reconciler will detach this volume.
+func (adc *attachDetachController) processVolumeAttachments() error {
+	vas, err := adc.volumeAttachmentLister.List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list VolumeAttachment objects: %v", err)
+		return err
+	}
+	for _, va := range vas {
+		nodeName := types.NodeName(va.Spec.NodeName)
+		pvName := va.Spec.Source.PersistentVolumeName
+		if pvName == nil {
+			// Currently VA objects are created for CSI volumes only. nil pvName is unexpected, generate a warning
+			klog.Warningf("Skipping the va as its pvName is nil, va.Name: %q, nodeName: %q",
+				va.Name, nodeName)
+			continue
+		}
+		pv, err := adc.pvLister.Get(*pvName)
+		if err != nil {
+			klog.Errorf("Unable to lookup pv object for: %q, err: %v", *pvName, err)
+			continue
+		}
+
+		var plugin volume.AttachableVolumePlugin
+		volumeSpec := volume.NewSpecFromPersistentVolume(pv, false)
+
+		// Consult csiMigratedPluginManager first before querying the plugins registered during runtime in volumePluginMgr.
+		// In-tree plugins that provisioned PVs will not be registered anymore after migration to CSI, once the respective
+		// feature gate is enabled.
+		if inTreePluginName, err := adc.csiMigratedPluginManager.GetInTreePluginNameFromSpec(pv, nil); err == nil {
+			if adc.csiMigratedPluginManager.IsMigrationEnabledForPlugin(inTreePluginName) {
+				// PV is migrated and should be handled by the CSI plugin instead of the in-tree one
+				plugin, _ = adc.volumePluginMgr.FindAttachablePluginByName(csi.CSIPluginName)
+				// podNamespace is not needed here for Azurefile as the volumeName generated will be the same with or without podNamespace
+				volumeSpec, err = csimigration.TranslateInTreeSpecToCSI(volumeSpec, "" /* podNamespace */, adc.intreeToCSITranslator)
+				if err != nil {
+					klog.Errorf(
+						"Failed to translate intree volumeSpec to CSI volumeSpec for volume:%q, va.Name:%q, nodeName:%q: %s. Error: %v",
+						*pvName,
+						va.Name,
+						nodeName,
+						inTreePluginName,
+						err)
+					continue
+				}
+			}
+		}
+
+		if plugin == nil {
+			plugin, err = adc.volumePluginMgr.FindAttachablePluginBySpec(volumeSpec)
+			if err != nil || plugin == nil {
+				// Currently VA objects are created for CSI volumes only. nil plugin is unexpected, generate a warning
+				klog.Warningf(
+					"Skipping processing the volume %q on nodeName: %q, no attacher interface found. err=%v",
+					*pvName,
+					nodeName,
+					err)
+				continue
+			}
+		}
+
+		volumeName, err := volumeutil.GetUniqueVolumeNameFromSpec(plugin, volumeSpec)
+		if err != nil {
+			klog.Errorf(
+				"Failed to find unique name for volume:%q, va.Name:%q, nodeName:%q: %v",
+				*pvName,
+				va.Name,
+				nodeName,
+				err)
+			continue
+		}
+		attachState := adc.actualStateOfWorld.GetAttachState(volumeName, nodeName)
+		if attachState == cache.AttachStateDetached {
+			klog.V(1).Infof("Marking volume attachment as uncertain as volume:%q (%q) is not attached (%v)",
+				volumeName, nodeName, attachState)
+			err = adc.actualStateOfWorld.MarkVolumeAsUncertain(volumeName, volumeSpec, nodeName)
+			if err != nil {
+				klog.Errorf("MarkVolumeAsUncertain fail to add the volume %q (%q) to ASW. err: %s", volumeName, nodeName, err)
+			}
+		}
+	}
+	return nil
+}
+
 var _ volume.VolumeHost = &attachDetachController{}
 var _ volume.AttachDetachVolumeHost = &attachDetachController{}
 
@@ -693,12 +785,16 @@ func (adc *attachDetachController) CSINodeLister() storagelistersv1.CSINodeListe
 	return adc.csiNodeLister
 }
 
-func (adc *attachDetachController) CSIDriverLister() storagelisters.CSIDriverLister {
+func (adc *attachDetachController) CSIDriverLister() storagelistersv1.CSIDriverLister {
 	return adc.csiDriverLister
 }
 
 func (adc *attachDetachController) IsAttachDetachController() bool {
 	return true
+}
+
+func (adc *attachDetachController) VolumeAttachmentLister() storagelistersv1.VolumeAttachmentLister {
+	return adc.volumeAttachmentLister
 }
 
 // VolumeHost implementation
@@ -721,6 +817,10 @@ func (adc *attachDetachController) GetPodsDir() string {
 
 func (adc *attachDetachController) GetPodVolumeDir(podUID types.UID, pluginName, volumeName string) string {
 	return ""
+}
+
+func (adc *attachDetachController) GetHostIDsForPod(pod *v1.Pod, containerUID, containerGID *int64) (hostUID, hostGID *int64, err error) {
+	return nil, nil, nil
 }
 
 func (adc *attachDetachController) GetPodPluginDir(podUID types.UID, pluginName string) string {
@@ -761,6 +861,10 @@ func (adc *attachDetachController) GetHostIP() (net.IP, error) {
 
 func (adc *attachDetachController) GetNodeAllocatable() (v1.ResourceList, error) {
 	return v1.ResourceList{}, nil
+}
+
+func (adc *attachDetachController) GetAttachedVolumesFromNodeStatus() (map[v1.UniqueVolumeName]string, error) {
+	return map[v1.UniqueVolumeName]string{}, nil
 }
 
 func (adc *attachDetachController) GetSecretFunc() func(namespace, name string) (*v1.Secret, error) {
@@ -814,7 +918,7 @@ func (adc *attachDetachController) GetNodeName() types.NodeName {
 }
 
 func (adc *attachDetachController) GetEventRecorder() record.EventRecorder {
-	return adc.recorder
+	return nil
 }
 
 func (adc *attachDetachController) GetSubpather() subpath.Interface {
@@ -822,6 +926,10 @@ func (adc *attachDetachController) GetSubpather() subpath.Interface {
 	return nil
 }
 
-func (adc *attachDetachController) GetCSIDriverLister() storagelisters.CSIDriverLister {
+func (adc *attachDetachController) GetFilteredDialOptions() *proxyutil.FilteredDialOptions {
+	return adc.filteredDialOptions
+}
+
+func (adc *attachDetachController) GetCSIDriverLister() storagelistersv1.CSIDriverLister {
 	return adc.csiDriverLister
 }

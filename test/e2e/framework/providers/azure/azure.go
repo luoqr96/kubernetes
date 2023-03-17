@@ -21,12 +21,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-07-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/legacy-cloud-providers/azure"
+	"k8s.io/legacy-cloud-providers/azure/clients/fileclient"
 )
 
 func init() {
@@ -41,15 +42,16 @@ func newProvider() (framework.ProviderInterface, error) {
 	if err != nil {
 		framework.Logf("Couldn't open cloud provider configuration %s: %#v",
 			framework.TestContext.CloudConfig.ConfigFile, err)
+	} else {
+		defer config.Close()
 	}
-	defer config.Close()
 	azureCloud, err := azure.NewCloud(config)
 	return &Provider{
 		azureCloud: azureCloud.(*azure.Cloud),
 	}, err
 }
 
-//Provider is a structure to handle Azure clouds for e2e testing
+// Provider is a structure to handle Azure clouds for e2e testing
 type Provider struct {
 	framework.NullProvider
 
@@ -72,11 +74,48 @@ func (p *Provider) CreatePD(zone string) (string, error) {
 		PVCName:            pdName,
 		SizeGB:             1,
 		Tags:               nil,
-		AvailabilityZone:   zone,
 		DiskIOPSReadWrite:  "",
 		DiskMBpsReadWrite:  "",
 	}
+
+	// do not use blank zone definition
+	if len(zone) > 0 {
+		volumeOptions.AvailabilityZone = zone
+	}
 	return p.azureCloud.CreateManagedDisk(volumeOptions)
+}
+
+// CreateShare creates a share and return its account name and key.
+func (p *Provider) CreateShare() (string, string, string, error) {
+	accountOptions := &azure.AccountOptions{
+		Name:                      "",
+		Type:                      string(compute.StandardLRS),
+		ResourceGroup:             p.azureCloud.ResourceGroup,
+		Location:                  p.azureCloud.GetLocation(),
+		EnableHTTPSTrafficOnly:    true,
+		Tags:                      nil,
+		VirtualNetworkResourceIDs: nil,
+	}
+
+	shareOptions := &fileclient.ShareOptions{
+		Name:       fmt.Sprintf("%s-%s", framework.TestContext.Prefix, string(uuid.NewUUID())),
+		RequestGiB: 1,
+	}
+
+	accountName, accountKey, err := p.azureCloud.CreateFileShare(accountOptions, shareOptions)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	return accountName, accountKey, shareOptions.Name, nil
+}
+
+func (p *Provider) DeleteShare(accountName, shareName string) error {
+	err := p.azureCloud.DeleteFileShare(p.azureCloud.ResourceGroup, accountName, shareName)
+	if err != nil {
+		framework.Logf("failed to delete Azure File share %q: %v", shareName, err)
+	}
+	return err
 }
 
 // DeletePD deletes a persistent volume

@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This script checks version dependencies of modules. It checks whether all
+# pinned versions of checked dependencies match their preferred version or not.
+# Usage: `hack/lint-dependencies.sh`.
+
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -23,8 +27,8 @@ source "${KUBE_ROOT}/hack/lib/init.sh"
 
 # Explicitly opt into go modules, even though we're inside a GOPATH directory
 export GO111MODULE=on
-# Explicitly clear GOFLAGS, since GOFLAGS=-mod=vendor breaks dependency resolution while rebuilding vendor
-export GOFLAGS=
+# Explicitly set GOFLAGS to ignore vendor, since GOFLAGS=-mod=vendor breaks dependency resolution while rebuilding vendor
+export GOFLAGS=-mod=mod
 # Detect problematic GOPROXY settings that prevent lookup of dependencies
 if [[ "${GOPROXY:-}" == "off" ]]; then
   kube::log::error "Cannot run with \$GOPROXY=off"
@@ -34,30 +38,16 @@ fi
 kube::golang::verify_go_version
 kube::util::require-jq
 
-case "${1:-}" in
-"--all")
-  echo "Checking all dependencies"
-  filter=''
-  ;;
-"-a")
-  echo "Checking all dependencies"
-  filter=''
-  ;;
-"")
-  # by default, skip checking golang.org/x/... dependencies... we pin to levels that match our go version for those
-  echo "Skipping golang.org/x/... dependencies, pass --all to include"
-  filter='select(.Path | startswith("golang.org/x/") | not) |'
-  ;;
-*)
-  kube::log::error "Unrecognized arg: ${1}"
-  exit 1
-  ;;
-esac
+# let us log all errors before we exit
+rc=0
+
+# List of dependencies we need to avoid dragging back into kubernetes/kubernetes
+# Check if unwanted dependencies are removed
+go run k8s.io/kubernetes/cmd/dependencyverifier "${KUBE_ROOT}/hack/unwanted-dependencies.json"
 
 outdated=$(go list -m -json all | jq -r "
-  select(.Replace.Version != null) | 
-  select(.Version != .Replace.Version) | 
-  ${filter}
+  select(.Replace.Version != null) |
+  select(.Version != .Replace.Version) |
   select(.Path) |
   \"\(.Path)
     pinned:    \(.Replace.Version)
@@ -75,6 +65,20 @@ if [[ -n "${outdated}" ]]; then
   echo "${outdated}"
 fi
 
+noncanonical=$(go list -m -json all | jq -r "
+  select(.Replace.Version != null) |
+  select(.Path != .Replace.Path) |
+  select(.Path) |
+  \"  \(.Path) is replaced with \(.Replace.Path)\"
+")
+if [[ -n "${noncanonical}" ]]; then
+  echo ""
+  echo "These modules are pinned to non-canonical repos."
+  echo "Revert to using the canonical repo for these modules before merge"
+  echo ""
+  echo "${noncanonical}"
+fi
+
 unused=$(comm -23 \
   <(go mod edit -json | jq -r '.Replace[] | select(.New.Version != null) | .Old.Path' | sort) \
   <(go list -m -json all | jq -r .Path | sort))
@@ -84,9 +88,10 @@ if [[ -n "${unused}" ]]; then
   echo "${unused}" | xargs -L 1 echo 'GO111MODULE=on go mod edit -dropreplace'
 fi
 
-if [[ -n "${unused}${outdated}" ]]; then
-  exit 1
+if [[ -n "${unused}${outdated}${noncanonical}" ]]; then
+  rc=1
+else
+  echo "All pinned versions of checked dependencies match their preferred version."
 fi
 
-echo "All pinned versions of checked dependencies match their preferred version."
-exit 0
+exit $rc

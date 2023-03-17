@@ -19,15 +19,13 @@ package container
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
-	"k8s.io/kubernetes/pkg/features"
 )
 
 func TestEnvVarsToMap(t *testing.T) {
@@ -42,7 +40,7 @@ func TestEnvVarsToMap(t *testing.T) {
 		},
 	}
 
-	varMap := EnvVarsToMap(vars)
+	varMap := envVarsToMap(vars)
 
 	if e, a := len(vars), len(varMap); e != a {
 		t.Errorf("Unexpected map length; expected: %d, got %d", e, a)
@@ -325,7 +323,6 @@ func TestExpandVolumeMountsWithSubpath(t *testing.T) {
 }
 
 func TestGetContainerSpec(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, true)()
 	for _, tc := range []struct {
 		name          string
 		havePod       *v1.Pod
@@ -413,7 +410,7 @@ func TestShouldContainerBeRestarted(t *testing.T) {
 		ID:        pod.UID,
 		Name:      pod.Name,
 		Namespace: pod.Namespace,
-		ContainerStatuses: []*ContainerStatus{
+		ContainerStatuses: []*Status{
 			{
 				Name:  "alive",
 				State: ContainerStateRunning,
@@ -449,12 +446,35 @@ func TestShouldContainerBeRestarted(t *testing.T) {
 		v1.RestartPolicyOnFailure,
 		v1.RestartPolicyAlways,
 	}
+
+	// test policies
 	expected := map[string][]bool{
 		"no-history": {true, true, true},
 		"alive":      {false, false, false},
 		"succeed":    {false, false, true},
 		"failed":     {false, true, true},
 		"unknown":    {true, true, true},
+	}
+	for _, c := range pod.Spec.Containers {
+		for i, policy := range policies {
+			pod.Spec.RestartPolicy = policy
+			e := expected[c.Name][i]
+			r := ShouldContainerBeRestarted(&c, pod, podStatus)
+			if r != e {
+				t.Errorf("Restart for container %q with restart policy %q expected %t, got %t",
+					c.Name, policy, e, r)
+			}
+		}
+	}
+
+	// test deleted pod
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	expected = map[string][]bool{
+		"no-history": {false, false, false},
+		"alive":      {false, false, false},
+		"succeed":    {false, false, false},
+		"failed":     {false, false, false},
+		"unknown":    {false, false, false},
 	}
 	for _, c := range pod.Spec.Containers {
 		for i, policy := range policies {
@@ -534,9 +554,8 @@ func TestMakePortMappings(t *testing.T) {
 			HostIP:        ip,
 		}
 	}
-	portMapping := func(name string, protocol v1.Protocol, containerPort, hostPort int, ip string) PortMapping {
+	portMapping := func(protocol v1.Protocol, containerPort, hostPort int, ip string) PortMapping {
 		return PortMapping{
-			Name:          name,
 			Protocol:      protocol,
 			ContainerPort: containerPort,
 			HostPort:      hostPort,
@@ -557,8 +576,6 @@ func TestMakePortMappings(t *testing.T) {
 					port("foo", v1.ProtocolUDP, 555, 5555, ""),
 					// Duplicated, should be ignored.
 					port("foo", v1.ProtocolUDP, 888, 8888, ""),
-					// Duplicated, should be ignored.
-					port("", v1.ProtocolTCP, 80, 8888, "127.0.0.1"),
 					// Duplicated with different address family, shouldn't be ignored
 					port("", v1.ProtocolTCP, 80, 8080, "::"),
 					// No address family specified
@@ -566,11 +583,52 @@ func TestMakePortMappings(t *testing.T) {
 				},
 			},
 			[]PortMapping{
-				portMapping("fooContainer-v4-TCP:80", v1.ProtocolTCP, 80, 8080, "127.0.0.1"),
-				portMapping("fooContainer-v4-TCP:443", v1.ProtocolTCP, 443, 4343, "192.168.0.1"),
-				portMapping("fooContainer-foo", v1.ProtocolUDP, 555, 5555, ""),
-				portMapping("fooContainer-v6-TCP:80", v1.ProtocolTCP, 80, 8080, "::"),
-				portMapping("fooContainer-any-TCP:1234", v1.ProtocolTCP, 1234, 5678, ""),
+				portMapping(v1.ProtocolTCP, 80, 8080, "127.0.0.1"),
+				portMapping(v1.ProtocolTCP, 443, 4343, "192.168.0.1"),
+				portMapping(v1.ProtocolUDP, 555, 5555, ""),
+				portMapping(v1.ProtocolTCP, 80, 8080, "::"),
+				portMapping(v1.ProtocolTCP, 1234, 5678, ""),
+			},
+		},
+		{
+			// The same container port can be mapped to different host ports
+			&v1.Container{
+				Name: "fooContainer",
+				Ports: []v1.ContainerPort{
+					port("", v1.ProtocolTCP, 443, 4343, "192.168.0.1"),
+					port("", v1.ProtocolTCP, 4343, 4343, "192.168.0.1"),
+				},
+			},
+			[]PortMapping{
+				portMapping(v1.ProtocolTCP, 443, 4343, "192.168.0.1"),
+				portMapping(v1.ProtocolTCP, 4343, 4343, "192.168.0.1"),
+			},
+		},
+		{
+			// The same container port AND same container host is not OK
+			&v1.Container{
+				Name: "fooContainer",
+				Ports: []v1.ContainerPort{
+					port("", v1.ProtocolTCP, 443, 4343, ""),
+					port("", v1.ProtocolTCP, 443, 4343, ""),
+				},
+			},
+			[]PortMapping{
+				portMapping(v1.ProtocolTCP, 443, 4343, ""),
+			},
+		},
+		{
+			// multihomed nodes - multiple IP scenario
+			&v1.Container{
+				Name: "fooContainer",
+				Ports: []v1.ContainerPort{
+					port("", v1.ProtocolTCP, 443, 4343, "192.168.0.1"),
+					port("", v1.ProtocolTCP, 443, 4343, "172.16.0.1"),
+				},
+			},
+			[]PortMapping{
+				portMapping(v1.ProtocolTCP, 443, 4343, "192.168.0.1"),
+				portMapping(v1.ProtocolTCP, 443, 4343, "172.16.0.1"),
 			},
 		},
 	}
@@ -612,5 +670,241 @@ func TestHashContainer(t *testing.T) {
 
 		hashVal := HashContainer(&container)
 		assert.Equal(t, tc.expectedHash, hashVal, "the hash value here should not be changed.")
+	}
+}
+
+func TestShouldRecordEvent(t *testing.T) {
+	var innerEventRecorder = &innerEventRecorder{
+		recorder: nil,
+	}
+
+	_, actual := innerEventRecorder.shouldRecordEvent(nil)
+	assert.Equal(t, false, actual)
+
+	var obj = &v1.ObjectReference{Namespace: "claimrefns", Name: "claimrefname"}
+
+	_, actual = innerEventRecorder.shouldRecordEvent(obj)
+	assert.Equal(t, true, actual)
+
+	obj = &v1.ObjectReference{Namespace: "system", Name: "infra", FieldPath: "implicitly required container "}
+
+	_, actual = innerEventRecorder.shouldRecordEvent(obj)
+	assert.Equal(t, false, actual)
+
+	var nilObj *v1.ObjectReference = nil
+	_, actual = innerEventRecorder.shouldRecordEvent(nilObj)
+	assert.Equal(t, false, actual, "should not panic if the typed nil was used, see https://github.com/kubernetes/kubernetes/issues/95552")
+}
+
+func TestHasWindowsHostProcessContainer(t *testing.T) {
+	trueVar := true
+	falseVar := false
+	const containerName = "container"
+
+	testCases := []struct {
+		name           string
+		podSpec        *v1.PodSpec
+		expectedResult bool
+	}{
+		{
+			name: "hostprocess not set anywhere",
+			podSpec: &v1.PodSpec{
+				Containers: []v1.Container{{
+					Name: containerName,
+				}},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "pod with hostprocess=false",
+			podSpec: &v1.PodSpec{
+				HostNetwork: true,
+				SecurityContext: &v1.PodSecurityContext{
+					WindowsOptions: &v1.WindowsSecurityContextOptions{
+						HostProcess: &falseVar,
+					},
+				},
+				Containers: []v1.Container{{
+					Name: containerName,
+				}},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "pod with hostprocess=true",
+			podSpec: &v1.PodSpec{
+				HostNetwork: true,
+				SecurityContext: &v1.PodSecurityContext{
+					WindowsOptions: &v1.WindowsSecurityContextOptions{
+						HostProcess: &trueVar,
+					},
+				},
+				Containers: []v1.Container{{
+					Name: containerName,
+				}},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "container with hostprocess=false",
+			podSpec: &v1.PodSpec{
+				HostNetwork: true,
+				Containers: []v1.Container{{
+					Name: containerName,
+					SecurityContext: &v1.SecurityContext{
+						WindowsOptions: &v1.WindowsSecurityContextOptions{
+							HostProcess: &falseVar,
+						},
+					},
+				}},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "container with hostprocess=true",
+			podSpec: &v1.PodSpec{
+				HostNetwork: true,
+				Containers: []v1.Container{{
+					Name: containerName,
+					SecurityContext: &v1.SecurityContext{
+						WindowsOptions: &v1.WindowsSecurityContextOptions{
+							HostProcess: &trueVar,
+						},
+					},
+				}},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "pod with hostprocess=false, container with hostprocess=true",
+			podSpec: &v1.PodSpec{
+				HostNetwork: true,
+				SecurityContext: &v1.PodSecurityContext{
+					WindowsOptions: &v1.WindowsSecurityContextOptions{
+						HostProcess: &falseVar,
+					},
+				},
+				Containers: []v1.Container{{
+					Name: containerName,
+					SecurityContext: &v1.SecurityContext{
+						WindowsOptions: &v1.WindowsSecurityContextOptions{
+							HostProcess: &trueVar,
+						},
+					},
+				}},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "pod with hostprocess=true, container with hostprocess=flase",
+			podSpec: &v1.PodSpec{
+				HostNetwork: true,
+				SecurityContext: &v1.PodSecurityContext{
+					WindowsOptions: &v1.WindowsSecurityContextOptions{
+						HostProcess: &trueVar,
+					},
+				},
+				Containers: []v1.Container{{
+					Name: containerName,
+					SecurityContext: &v1.SecurityContext{
+						WindowsOptions: &v1.WindowsSecurityContextOptions{
+							HostProcess: &falseVar,
+						},
+					},
+				}},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "containers with hostproces=mixed",
+			podSpec: &v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name: containerName,
+						SecurityContext: &v1.SecurityContext{
+							WindowsOptions: &v1.WindowsSecurityContextOptions{
+								HostProcess: &falseVar,
+							},
+						},
+					},
+					{
+						Name: containerName,
+						SecurityContext: &v1.SecurityContext{
+							WindowsOptions: &v1.WindowsSecurityContextOptions{
+								HostProcess: &trueVar,
+							},
+						},
+					},
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "pod with hostProcess=false, containers with hostproces=mixed",
+			podSpec: &v1.PodSpec{
+				SecurityContext: &v1.PodSecurityContext{
+					WindowsOptions: &v1.WindowsSecurityContextOptions{
+						HostProcess: &falseVar,
+					},
+				},
+				Containers: []v1.Container{
+					{
+						Name: containerName,
+						SecurityContext: &v1.SecurityContext{
+							WindowsOptions: &v1.WindowsSecurityContextOptions{
+								HostProcess: &falseVar,
+							},
+						},
+					},
+					{
+						Name: containerName,
+						SecurityContext: &v1.SecurityContext{
+							WindowsOptions: &v1.WindowsSecurityContextOptions{
+								HostProcess: &trueVar,
+							},
+						},
+					},
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "pod with hostProcess=true, containers with hostproces=mixed",
+			podSpec: &v1.PodSpec{
+				SecurityContext: &v1.PodSecurityContext{
+					WindowsOptions: &v1.WindowsSecurityContextOptions{
+						HostProcess: &trueVar,
+					},
+				},
+				Containers: []v1.Container{
+					{
+						Name: containerName,
+						SecurityContext: &v1.SecurityContext{
+							WindowsOptions: &v1.WindowsSecurityContextOptions{
+								HostProcess: &falseVar,
+							},
+						},
+					},
+					{
+						Name: containerName,
+						SecurityContext: &v1.SecurityContext{
+							WindowsOptions: &v1.WindowsSecurityContextOptions{
+								HostProcess: &trueVar,
+							},
+						},
+					},
+				},
+			},
+			expectedResult: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			pod := &v1.Pod{}
+			pod.Spec = *testCase.podSpec
+			result := HasWindowsHostProcessContainer(pod)
+			assert.Equal(t, result, testCase.expectedResult)
+		})
 	}
 }

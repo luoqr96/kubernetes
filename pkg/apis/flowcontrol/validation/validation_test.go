@@ -17,15 +17,22 @@ limitations under the License.
 package validation
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	flowcontrolv1alpha1 "k8s.io/api/flowcontrol/v1alpha1"
+	flowcontrolv1beta1 "k8s.io/api/flowcontrol/v1beta1"
+	flowcontrolv1beta2 "k8s.io/api/flowcontrol/v1beta2"
+	flowcontrolv1beta3 "k8s.io/api/flowcontrol/v1beta3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/kubernetes/pkg/apis/flowcontrol"
+	"k8s.io/utils/pointer"
 )
 
 func TestFlowSchemaValidation(t *testing.T) {
@@ -614,7 +621,7 @@ func TestFlowSchemaValidation(t *testing.T) {
 				},
 			},
 			expectedErrors: field.ErrorList{
-				field.Invalid(field.NewPath("spec").Child("priorityLevelConfiguration").Child("name"), "system+++$$", `a DNS-1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`),
+				field.Invalid(field.NewPath("spec").Child("priorityLevelConfiguration").Child("name"), "system+++$$", `a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`),
 			},
 		},
 		{
@@ -857,7 +864,7 @@ func TestFlowSchemaValidation(t *testing.T) {
 				},
 			},
 			expectedErrors: field.ErrorList{
-				field.Invalid(field.NewPath("spec").Child("rules").Index(0).Child("resourceRules").Index(0).Child("namespaces").Index(0), "-foo", nsErrIntro+`a DNS-1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')`),
+				field.Invalid(field.NewPath("spec").Child("rules").Index(0).Child("resourceRules").Index(0).Child("namespaces").Index(0), "-foo", nsErrIntro+`a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')`),
 			},
 		},
 		{
@@ -910,7 +917,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 	badSpec := flowcontrol.PriorityLevelConfigurationSpec{
 		Type: flowcontrol.PriorityLevelEnablementLimited,
 		Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-			AssuredConcurrencyShares: 42,
+			NominalConcurrencyShares: 42,
 			LimitResponse: flowcontrol.LimitResponse{
 				Type: flowcontrol.LimitResponseTypeReject},
 		},
@@ -966,7 +973,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 42,
+						NominalConcurrencyShares: 42,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeReject},
 					},
@@ -983,7 +990,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeReject,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1013,14 +1020,11 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 5,
+						LendablePercent:          pointer.Int32(0),
 						LimitResponse: flowcontrol.LimitResponse{
-							Type: flowcontrol.LimitResponseTypeQueue,
-							Queuing: &flowcontrol.QueuingConfiguration{
-								Queues:           128,
-								HandSize:         6,
-								QueueLengthLimit: 100,
-							}}}},
+							Type: flowcontrol.LimitResponseTypeReject,
+						}}},
 			},
 			expectedErrors: field.ErrorList{},
 		},
@@ -1033,7 +1037,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 						}}},
@@ -1049,7 +1053,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1069,7 +1073,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1091,7 +1095,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1113,7 +1117,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1136,7 +1140,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1156,7 +1160,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 				Spec: flowcontrol.PriorityLevelConfigurationSpec{
 					Type: flowcontrol.PriorityLevelEnablementLimited,
 					Limited: &flowcontrol.LimitedPriorityLevelConfiguration{
-						AssuredConcurrencyShares: 100,
+						NominalConcurrencyShares: 100,
 						LimitResponse: flowcontrol.LimitResponse{
 							Type: flowcontrol.LimitResponseTypeQueue,
 							Queuing: &flowcontrol.QueuingConfiguration{
@@ -1172,7 +1176,7 @@ func TestPriorityLevelConfigurationValidation(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			errs := ValidatePriorityLevelConfiguration(testCase.priorityLevelConfiguration)
+			errs := ValidatePriorityLevelConfiguration(testCase.priorityLevelConfiguration, flowcontrolv1beta3.SchemeGroupVersion)
 			if !assert.ElementsMatch(t, testCase.expectedErrors, errs) {
 				t.Logf("mismatch: %v", cmp.Diff(testCase.expectedErrors, errs))
 			}
@@ -1359,6 +1363,166 @@ func TestValidateNonResourceURLPath(t *testing.T) {
 			err := ValidateNonResourceURLPath(testCase.path, field.NewPath(""))
 			assert.Equal(t, testCase.expectingError, err != nil,
 				"actual error: %v", err)
+		})
+	}
+}
+
+func TestValidateLimitedPriorityLevelConfiguration(t *testing.T) {
+	errExpectedFn := func(fieldName string) field.ErrorList {
+		return field.ErrorList{
+			field.Invalid(field.NewPath("spec").Child("limited").Child(fieldName), int32(0), "must be positive"),
+		}
+	}
+
+	tests := []struct {
+		requestVersion    schema.GroupVersion
+		concurrencyShares int32
+		errExpected       field.ErrorList
+	}{
+		{
+			requestVersion:    flowcontrolv1alpha1.SchemeGroupVersion,
+			concurrencyShares: 0,
+			errExpected:       errExpectedFn("assuredConcurrencyShares"),
+		},
+		{
+			requestVersion:    flowcontrolv1beta1.SchemeGroupVersion,
+			concurrencyShares: 0,
+			errExpected:       errExpectedFn("assuredConcurrencyShares"),
+		},
+		{
+			requestVersion:    flowcontrolv1beta2.SchemeGroupVersion,
+			concurrencyShares: 0,
+			errExpected:       errExpectedFn("assuredConcurrencyShares"),
+		},
+		{
+			requestVersion:    flowcontrolv1beta3.SchemeGroupVersion,
+			concurrencyShares: 0,
+			errExpected:       errExpectedFn("nominalConcurrencyShares"),
+		},
+		{
+			// let's simulate a post v1beta3 version, we expect the
+			// error to return the new field introduced in v1beta3.
+			requestVersion:    schema.GroupVersion{Group: flowcontrolv1beta3.GroupName, Version: "v1"},
+			concurrencyShares: 0,
+			errExpected:       errExpectedFn("nominalConcurrencyShares"),
+		},
+		{
+			// this should never really happen in real life, the request
+			// context should always contain the request {group, version}
+			requestVersion:    schema.GroupVersion{},
+			concurrencyShares: 0,
+			errExpected:       errExpectedFn("nominalConcurrencyShares"),
+		},
+		{
+			requestVersion:    flowcontrolv1beta3.SchemeGroupVersion,
+			concurrencyShares: 100,
+			errExpected:       nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.requestVersion.String(), func(t *testing.T) {
+			configuration := &flowcontrol.LimitedPriorityLevelConfiguration{
+				NominalConcurrencyShares: test.concurrencyShares,
+				LimitResponse: flowcontrol.LimitResponse{
+					Type: flowcontrol.LimitResponseTypeReject,
+				},
+			}
+			specPath := field.NewPath("spec").Child("limited")
+
+			errGot := ValidateLimitedPriorityLevelConfiguration(configuration, test.requestVersion, specPath)
+			if !cmp.Equal(test.errExpected, errGot) {
+				t.Errorf("Expected error: %v, diff: %s", test.errExpected, cmp.Diff(test.errExpected, errGot))
+			}
+		})
+	}
+}
+
+func TestValidateLimitedPriorityLevelConfigurationWithBorrowing(t *testing.T) {
+	errLendablePercentFn := func(v int32) field.ErrorList {
+		return field.ErrorList{
+			field.Invalid(field.NewPath("spec").Child("limited").Child("lendablePercent"), v, "must be between 0 and 100, inclusive"),
+		}
+	}
+	errBorrowingLimitPercentFn := func(v int32) field.ErrorList {
+		return field.ErrorList{
+			field.Invalid(field.NewPath("spec").Child("limited").Child("borrowingLimitPercent"), v, "if specified, must be a non-negative integer"),
+		}
+	}
+
+	makeTestNameFn := func(lendablePercent *int32, borrowingLimitPercent *int32) string {
+		formatFn := func(v *int32) string {
+			if v == nil {
+				return "<nil>"
+			}
+			return fmt.Sprintf("%d", *v)
+		}
+		return fmt.Sprintf("lendablePercent %s, borrowingLimitPercent %s", formatFn(lendablePercent), formatFn(borrowingLimitPercent))
+	}
+
+	tests := []struct {
+		lendablePercent       *int32
+		borrowingLimitPercent *int32
+		errExpected           field.ErrorList
+	}{
+		{
+			lendablePercent: nil,
+			errExpected:     nil,
+		},
+		{
+			lendablePercent: pointer.Int32(0),
+			errExpected:     nil,
+		},
+		{
+			lendablePercent: pointer.Int32(100),
+			errExpected:     nil,
+		},
+		{
+			lendablePercent: pointer.Int32(101),
+			errExpected:     errLendablePercentFn(101),
+		},
+		{
+			lendablePercent: pointer.Int32(-1),
+			errExpected:     errLendablePercentFn(-1),
+		},
+		{
+			borrowingLimitPercent: nil,
+			errExpected:           nil,
+		},
+		{
+			borrowingLimitPercent: pointer.Int32(1),
+			errExpected:           nil,
+		},
+		{
+			borrowingLimitPercent: pointer.Int32(100),
+			errExpected:           nil,
+		},
+		{
+			borrowingLimitPercent: pointer.Int32(0),
+			errExpected:           nil,
+		},
+		{
+			borrowingLimitPercent: pointer.Int32(-1),
+			errExpected:           errBorrowingLimitPercentFn(-1),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(makeTestNameFn(test.lendablePercent, test.borrowingLimitPercent), func(t *testing.T) {
+			configuration := &flowcontrol.LimitedPriorityLevelConfiguration{
+				NominalConcurrencyShares: 1,
+				LimitResponse: flowcontrol.LimitResponse{
+					Type: flowcontrol.LimitResponseTypeReject,
+				},
+				LendablePercent:       test.lendablePercent,
+				BorrowingLimitPercent: test.borrowingLimitPercent,
+			}
+			specPath := field.NewPath("spec").Child("limited")
+
+			errGot := ValidateLimitedPriorityLevelConfiguration(configuration, flowcontrolv1beta3.SchemeGroupVersion, specPath)
+			if !cmp.Equal(test.errExpected, errGot) {
+				t.Errorf("Expected error: %v, diff: %s", test.errExpected, cmp.Diff(test.errExpected, errGot))
+			}
 		})
 	}
 }

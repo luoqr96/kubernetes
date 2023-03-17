@@ -17,12 +17,9 @@ limitations under the License.
 package ipvs
 
 import (
-	"net"
-	"reflect"
-	"sort"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/util/version"
+	netutils "k8s.io/utils/net"
 )
 
 func TestVirtualServerEqual(t *testing.T) {
@@ -34,7 +31,7 @@ func TestVirtualServerEqual(t *testing.T) {
 	}{
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("10.20.30.40"),
+				Address:   netutils.ParseIPSloppy("10.20.30.40"),
 				Protocol:  "",
 				Port:      0,
 				Scheduler: "wrr",
@@ -42,7 +39,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("10.20.30.41"),
+				Address:   netutils.ParseIPSloppy("10.20.30.41"),
 				Protocol:  "",
 				Port:      0,
 				Scheduler: "wrr",
@@ -54,7 +51,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "",
 				Port:      0,
 				Scheduler: "wrr",
@@ -62,7 +59,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("2017::beef"),
+				Address:   netutils.ParseIPSloppy("2017::beef"),
 				Protocol:  "",
 				Port:      0,
 				Scheduler: "wrr",
@@ -74,7 +71,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "TCP",
 				Port:      0,
 				Scheduler: "wrr",
@@ -82,7 +79,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("2012::beeef"),
+				Address:   netutils.ParseIPSloppy("2012::beeef"),
 				Protocol:  "UDP",
 				Port:      0,
 				Scheduler: "wrr",
@@ -94,7 +91,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "wrr",
@@ -102,7 +99,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "TCP",
 				Port:      8080,
 				Scheduler: "wrr",
@@ -114,7 +111,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "rr",
@@ -122,7 +119,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "wlc",
@@ -134,7 +131,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "rr",
@@ -142,7 +139,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "rr",
@@ -154,7 +151,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "",
 				Port:      0,
 				Scheduler: "wrr",
@@ -162,7 +159,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "",
 				Port:      0,
 				Scheduler: "wrr",
@@ -174,7 +171,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "rr",
@@ -182,7 +179,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   10800,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "TCP",
 				Port:      80,
 				Scheduler: "rr",
@@ -194,7 +191,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("2012::beef"),
+				Address:   netutils.ParseIPSloppy("2012::beef"),
 				Protocol:  "TCP",
 				Port:      0,
 				Scheduler: "wrr",
@@ -202,7 +199,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   0,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("2012::beeef"),
+				Address:   netutils.ParseIPSloppy("2012::beeef"),
 				Protocol:  "SCTP",
 				Port:      0,
 				Scheduler: "wrr",
@@ -214,7 +211,7 @@ func TestVirtualServerEqual(t *testing.T) {
 		},
 		{
 			svcA: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "SCTP",
 				Port:      80,
 				Scheduler: "rr",
@@ -222,7 +219,7 @@ func TestVirtualServerEqual(t *testing.T) {
 				Timeout:   10800,
 			},
 			svcB: &VirtualServer{
-				Address:   net.ParseIP("1.2.3.4"),
+				Address:   netutils.ParseIPSloppy("1.2.3.4"),
 				Protocol:  "SCTP",
 				Port:      80,
 				Scheduler: "rr",
@@ -251,11 +248,11 @@ func TestRealServerEqual(t *testing.T) {
 	}{
 		{
 			rsA: &RealServer{
-				Address: net.ParseIP("10.20.30.40"),
+				Address: netutils.ParseIPSloppy("10.20.30.40"),
 				Port:    80,
 			},
 			rsB: &RealServer{
-				Address: net.ParseIP("10.20.30.41"),
+				Address: netutils.ParseIPSloppy("10.20.30.41"),
 				Port:    80,
 			},
 			equal:  false,
@@ -263,11 +260,11 @@ func TestRealServerEqual(t *testing.T) {
 		},
 		{
 			rsA: &RealServer{
-				Address: net.ParseIP("2012::beef"),
+				Address: netutils.ParseIPSloppy("2012::beef"),
 				Port:    80,
 			},
 			rsB: &RealServer{
-				Address: net.ParseIP("2017::beef"),
+				Address: netutils.ParseIPSloppy("2017::beef"),
 				Port:    80,
 			},
 			equal:  false,
@@ -275,11 +272,11 @@ func TestRealServerEqual(t *testing.T) {
 		},
 		{
 			rsA: &RealServer{
-				Address: net.ParseIP("2012::beef"),
+				Address: netutils.ParseIPSloppy("2012::beef"),
 				Port:    80,
 			},
 			rsB: &RealServer{
-				Address: net.ParseIP("2012::beef"),
+				Address: netutils.ParseIPSloppy("2012::beef"),
 				Port:    8080,
 			},
 			equal:  false,
@@ -287,11 +284,11 @@ func TestRealServerEqual(t *testing.T) {
 		},
 		{
 			rsA: &RealServer{
-				Address: net.ParseIP("1.2.3.4"),
+				Address: netutils.ParseIPSloppy("1.2.3.4"),
 				Port:    3080,
 			},
 			rsB: &RealServer{
-				Address: net.ParseIP("1.2.3.4"),
+				Address: netutils.ParseIPSloppy("1.2.3.4"),
 				Port:    3080,
 			},
 			equal:  true,
@@ -299,11 +296,11 @@ func TestRealServerEqual(t *testing.T) {
 		},
 		{
 			rsA: &RealServer{
-				Address: net.ParseIP("2012::beef"),
+				Address: netutils.ParseIPSloppy("2012::beef"),
 				Port:    3080,
 			},
 			rsB: &RealServer{
-				Address: net.ParseIP("2012::beef"),
+				Address: netutils.ParseIPSloppy("2012::beef"),
 				Port:    3080,
 			},
 			equal:  true,
@@ -326,7 +323,7 @@ func TestFrontendServiceString(t *testing.T) {
 	}{
 		{
 			svc: &VirtualServer{
-				Address:  net.ParseIP("10.20.30.40"),
+				Address:  netutils.ParseIPSloppy("10.20.30.40"),
 				Protocol: "TCP",
 				Port:     80,
 			},
@@ -334,7 +331,7 @@ func TestFrontendServiceString(t *testing.T) {
 		},
 		{
 			svc: &VirtualServer{
-				Address:  net.ParseIP("2012::beef"),
+				Address:  netutils.ParseIPSloppy("2012::beef"),
 				Protocol: "UDP",
 				Port:     8080,
 			},
@@ -342,7 +339,7 @@ func TestFrontendServiceString(t *testing.T) {
 		},
 		{
 			svc: &VirtualServer{
-				Address:  net.ParseIP("10.20.30.41"),
+				Address:  netutils.ParseIPSloppy("10.20.30.41"),
 				Protocol: "ESP",
 				Port:     1234,
 			},
@@ -364,14 +361,14 @@ func TestFrontendDestinationString(t *testing.T) {
 	}{
 		{
 			svc: &RealServer{
-				Address: net.ParseIP("10.20.30.40"),
+				Address: netutils.ParseIPSloppy("10.20.30.40"),
 				Port:    80,
 			},
 			expected: "10.20.30.40:80",
 		},
 		{
 			svc: &RealServer{
-				Address: net.ParseIP("2012::beef"),
+				Address: netutils.ParseIPSloppy("2012::beef"),
 				Port:    8080,
 			},
 			expected: "[2012::beef]:8080",
@@ -382,34 +379,5 @@ func TestFrontendDestinationString(t *testing.T) {
 		if Tests[i].expected != Tests[i].svc.String() {
 			t.Errorf("case: %d got %v, expected %v", i, Tests[i].svc.String(), Tests[i].expected)
 		}
-	}
-}
-
-func TestGetRequiredIPVSModules(t *testing.T) {
-	Tests := []struct {
-		name          string
-		kernelVersion *version.Version
-		want          []string
-	}{
-		{
-			name:          "kernel version < 4.19",
-			kernelVersion: version.MustParseGeneric("4.18"),
-			want:          []string{KernelModuleIPVS, KernelModuleIPVSRR, KernelModuleIPVSWRR, KernelModuleIPVSSH, KernelModuleNfConntrackIPV4},
-		},
-		{
-			name:          "kernel version 4.19",
-			kernelVersion: version.MustParseGeneric("4.19"),
-			want:          []string{KernelModuleIPVS, KernelModuleIPVSRR, KernelModuleIPVSWRR, KernelModuleIPVSSH, KernelModuleNfConntrack},
-		},
-	}
-	for _, test := range Tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := GetRequiredIPVSModules(test.kernelVersion)
-			sort.Strings(got)
-			sort.Strings(test.want)
-			if !reflect.DeepEqual(got, test.want) {
-				t.Errorf("GetRequiredIPVSMods() = %v for kenel version: %s, want %v", got, test.kernelVersion, test.want)
-			}
-		})
 	}
 }

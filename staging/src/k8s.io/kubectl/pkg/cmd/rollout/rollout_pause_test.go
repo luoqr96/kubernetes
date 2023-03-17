@@ -18,7 +18,7 @@ package rollout
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"testing"
 
@@ -34,7 +34,6 @@ import (
 )
 
 var rolloutPauseGroupVersionEncoder = schema.GroupVersion{Group: "apps", Version: "v1"}
-var rolloutPauseGroupVersionDecoder = schema.GroupVersion{Group: "apps", Version: "v1"}
 
 func TestRolloutPause(t *testing.T) {
 	deploymentName := "deployment/nginx-deployment"
@@ -52,7 +51,7 @@ func TestRolloutPause(t *testing.T) {
 				case p == "/namespaces/test/deployments/nginx-deployment" && (m == "GET" || m == "PATCH"):
 					responseDeployment := &appsv1.Deployment{}
 					responseDeployment.Name = deploymentName
-					body := ioutil.NopCloser(bytes.NewReader([]byte(runtime.EncodeOrDie(encoder, responseDeployment))))
+					body := io.NopCloser(bytes.NewReader([]byte(runtime.EncodeOrDie(encoder, responseDeployment))))
 					return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: body}, nil
 				default:
 					t.Fatalf("unexpected request: %#v\n%#v", req.URL, req)

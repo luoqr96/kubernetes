@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -24,17 +25,17 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-07-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
-	"github.com/Azure/go-autorest/autorest/to"
 
 	"k8s.io/client-go/util/flowcontrol"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	azclients "k8s.io/legacy-cloud-providers/azure/clients"
 	"k8s.io/legacy-cloud-providers/azure/clients/armclient"
 	"k8s.io/legacy-cloud-providers/azure/metrics"
 	"k8s.io/legacy-cloud-providers/azure/retry"
+	"k8s.io/utils/pointer"
 )
 
 var _ Interface = &Client{}
@@ -56,8 +57,8 @@ type Client struct {
 // New creates a new VirtualMachine client with ratelimiting.
 func New(config *azclients.ClientConfig) *Client {
 	baseURI := config.ResourceManagerEndpoint
-	authorizer := autorest.NewBearerAuthorizer(config.ServicePrincipalToken)
-	armClient := armclient.New(authorizer, baseURI, "", APIVersion, config.Location, config.Backoff)
+	authorizer := config.Authorizer
+	armClient := armclient.New(authorizer, baseURI, config.UserAgent, APIVersion, config.Location, config.Backoff)
 	rateLimiterReader, rateLimiterWriter := azclients.NewRateLimiter(config.RateLimitConfig)
 
 	klog.V(2).Infof("Azure VirtualMachine client (read ops) using rate limit config: QPS=%g, bucket=%d",
@@ -194,8 +195,14 @@ func (c *Client) listVM(ctx context.Context, resourceGroupName string) ([]comput
 		return result, retry.GetError(resp, err)
 	}
 
-	for page.NotDone() {
-		result = append(result, *page.Response().Value...)
+	for {
+		result = append(result, page.Values()...)
+
+		// Abort the loop when there's no nextLink in the response.
+		if pointer.StringDeref(page.Response().NextLink, "") == "" {
+			break
+		}
+
 		if err = page.NextWithContext(ctx); err != nil {
 			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vm.list.next", resourceID, err)
 			return result, retry.GetError(page.Response().Response.Response, err)
@@ -289,12 +296,12 @@ func (c *Client) listResponder(resp *http.Response) (result compute.VirtualMachi
 // vmListResultPreparer prepares a request to retrieve the next set of results.
 // It returns nil if no more results exist.
 func (c *Client) vmListResultPreparer(ctx context.Context, vmlr compute.VirtualMachineListResult) (*http.Request, error) {
-	if vmlr.NextLink == nil || len(to.String(vmlr.NextLink)) < 1 {
+	if vmlr.NextLink == nil || len(pointer.StringDeref(vmlr.NextLink, "")) < 1 {
 		return nil, nil
 	}
 
 	decorators := []autorest.PrepareDecorator{
-		autorest.WithBaseURL(to.String(vmlr.NextLink)),
+		autorest.WithBaseURL(pointer.StringDeref(vmlr.NextLink, "")),
 	}
 	return c.armClient.PrepareGetRequest(ctx, decorators...)
 }
@@ -433,4 +440,47 @@ func (c *Client) createOrUpdateResponder(resp *http.Response) (*compute.VirtualM
 		autorest.ByClosing())
 	result.Response = autorest.Response{Response: resp}
 	return result, retry.GetError(resp, err)
+}
+
+// Delete deletes a VirtualMachine.
+func (c *Client) Delete(ctx context.Context, resourceGroupName string, VMName string) *retry.Error {
+	mc := metrics.NewMetricContext("vm", "delete", resourceGroupName, c.subscriptionID, "")
+
+	// Report errors if the client is rate limited.
+	if !c.rateLimiterWriter.TryAccept() {
+		mc.RateLimitedCount()
+		return retry.GetRateLimitError(true, "VMDelete")
+	}
+
+	// Report errors if the client is throttled.
+	if c.RetryAfterWriter.After(time.Now()) {
+		mc.ThrottledCount()
+		rerr := retry.GetThrottlingError("VMDelete", "client throttled", c.RetryAfterWriter)
+		return rerr
+	}
+
+	rerr := c.deleteVM(ctx, resourceGroupName, VMName)
+	mc.Observe(rerr.Error())
+	if rerr != nil {
+		if rerr.IsThrottled() {
+			// Update RetryAfterReader so that no more requests would be sent until RetryAfter expires.
+			c.RetryAfterWriter = rerr.RetryAfter
+		}
+
+		return rerr
+	}
+
+	return nil
+}
+
+// deleteVM deletes a VirtualMachine.
+func (c *Client) deleteVM(ctx context.Context, resourceGroupName string, VMName string) *retry.Error {
+	resourceID := armclient.GetResourceID(
+		c.subscriptionID,
+		resourceGroupName,
+		"Microsoft.Compute/virtualMachines",
+		VMName,
+	)
+
+	return c.armClient.DeleteResource(ctx, resourceID, "")
 }

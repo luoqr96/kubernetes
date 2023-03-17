@@ -38,11 +38,11 @@ import (
 
 var (
 	longDescr = templates.LongDesc(i18n.T(`
-  Display addresses of the master and services with label kubernetes.io/cluster-service=true
+  Display addresses of the control plane and services with label kubernetes.io/cluster-service=true.
   To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.`))
 
 	clusterinfoExample = templates.Examples(i18n.T(`
-		# Print the address of the master and cluster services
+		# Print the address of the control plane and cluster services
 		kubectl cluster-info`))
 )
 
@@ -55,28 +55,28 @@ type ClusterInfoOptions struct {
 	Client  *restclient.Config
 }
 
-func NewCmdClusterInfo(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdClusterInfo(restClientGetter genericclioptions.RESTClientGetter, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	o := &ClusterInfoOptions{
 		IOStreams: ioStreams,
 	}
 
 	cmd := &cobra.Command{
 		Use:     "cluster-info",
-		Short:   i18n.T("Display cluster info"),
+		Short:   i18n.T("Display cluster information"),
 		Long:    longDescr,
 		Example: clusterinfoExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmdutil.CheckErr(o.Complete(f, cmd))
+			cmdutil.CheckErr(o.Complete(restClientGetter, cmd))
 			cmdutil.CheckErr(o.Run())
 		},
 	}
-	cmd.AddCommand(NewCmdClusterInfoDump(f, ioStreams))
+	cmd.AddCommand(NewCmdClusterInfoDump(restClientGetter, ioStreams))
 	return cmd
 }
 
-func (o *ClusterInfoOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) error {
+func (o *ClusterInfoOptions) Complete(restClientGetter genericclioptions.RESTClientGetter, cmd *cobra.Command) error {
 	var err error
-	o.Client, err = f.ToRESTConfig()
+	o.Client, err = restClientGetter.ToRESTConfig()
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func (o *ClusterInfoOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) err
 	}
 	o.Namespace = cmdNamespace
 
-	o.Builder = f.NewBuilder()
+	o.Builder = resource.NewBuilder(restClientGetter)
 	return nil
 }
 
@@ -103,7 +103,7 @@ func (o *ClusterInfoOptions) Run() error {
 		if err != nil {
 			return err
 		}
-		printService(o.Out, "Kubernetes master", o.Client.Host)
+		printService(o.Out, "Kubernetes control plane", o.Client.Host)
 
 		services := r.Object.(*corev1.ServiceList).Items
 		for _, service := range services {

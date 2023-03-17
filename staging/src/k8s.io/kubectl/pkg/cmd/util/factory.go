@@ -60,7 +60,7 @@ type Factory interface {
 	UnstructuredClientForMapping(mapping *meta.RESTMapping) (resource.RESTClient, error)
 
 	// Returns a schema that can validate objects stored on disk.
-	Validator(validate bool) (validation.Schema, error)
-	// OpenAPISchema returns the schema openapi schema definition
+	Validator(validationDirective string) (validation.Schema, error)
+	// OpenAPISchema returns the parsed openapi schema definition
 	OpenAPISchema() (openapi.Resources, error)
 }

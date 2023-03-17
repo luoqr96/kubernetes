@@ -19,10 +19,12 @@ limitations under the License.
 package util
 
 import (
+	"errors"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/discovery"
@@ -31,27 +33,23 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kubectl/pkg/util/openapi"
-	openapivalidation "k8s.io/kubectl/pkg/util/openapi/validation"
 	"k8s.io/kubectl/pkg/validation"
 )
 
 type factoryImpl struct {
 	clientGetter genericclioptions.RESTClientGetter
 
-	// openAPIGetter loads and caches openapi specs
-	openAPIGetter openAPIGetter
-}
-
-type openAPIGetter struct {
-	once   sync.Once
-	getter openapi.Getter
+	// Caches OpenAPI document and parsed resources
+	openAPIParser *openapi.CachedOpenAPIParser
+	oapi          *openapi.CachedOpenAPIGetter
+	parser        sync.Once
+	getter        sync.Once
 }
 
 func NewFactory(clientGetter genericclioptions.RESTClientGetter) Factory {
 	if clientGetter == nil {
 		panic("attempt to instantiate client_access_factory with nil clientGetter")
 	}
-
 	f := &factoryImpl{
 		clientGetter: clientGetter,
 	}
@@ -143,8 +141,14 @@ func (f *factoryImpl) UnstructuredClientForMapping(mapping *meta.RESTMapping) (r
 	return restclient.RESTClientFor(cfg)
 }
 
-func (f *factoryImpl) Validator(validate bool) (validation.Schema, error) {
-	if !validate {
+func (f *factoryImpl) Validator(validationDirective string) (validation.Schema, error) {
+	// client-side schema validation is only performed
+	// when the validationDirective is strict.
+	// If the directive is warn, we rely on the ParamVerifyingSchema
+	// to ignore the client-side validation and provide a warning
+	// to the user that attempting warn validation when SS validation
+	// is unsupported is inert.
+	if validationDirective == metav1.FieldValidationIgnore {
 		return validation.NullSchema{}, nil
 	}
 
@@ -153,25 +157,46 @@ func (f *factoryImpl) Validator(validate bool) (validation.Schema, error) {
 		return nil, err
 	}
 
-	return validation.ConjunctiveSchema{
-		openapivalidation.NewSchemaValidation(resources),
+	schema := validation.ConjunctiveSchema{
+		validation.NewSchemaValidation(resources),
 		validation.NoDoubleKeySchema{},
-	}, nil
-}
+	}
 
-// OpenAPISchema returns metadata and structural information about Kubernetes object definitions.
-func (f *factoryImpl) OpenAPISchema() (openapi.Resources, error) {
-	discovery, err := f.clientGetter.ToDiscoveryClient()
+	dynamicClient, err := f.DynamicClient()
 	if err != nil {
 		return nil, err
 	}
+	// Create the FieldValidationVerifier for use in the ParamVerifyingSchema.
+	verifier := resource.NewQueryParamVerifier(dynamicClient, f.openAPIGetter(), resource.QueryParamFieldValidation)
+	return validation.NewParamVerifyingSchema(schema, verifier, string(validationDirective)), nil
+}
 
-	// Lazily initialize the OpenAPIGetter once
-	f.openAPIGetter.once.Do(func() {
-		// Create the caching OpenAPIGetter
-		f.openAPIGetter.getter = openapi.NewOpenAPIGetter(discovery)
+// OpenAPISchema returns metadata and structural information about
+// Kubernetes object definitions.
+func (f *factoryImpl) OpenAPISchema() (openapi.Resources, error) {
+	openAPIGetter := f.openAPIGetter()
+	if openAPIGetter == nil {
+		return nil, errors.New("no openapi getter")
+	}
+
+	// Lazily initialize the OpenAPIParser once
+	f.parser.Do(func() {
+		// Create the caching OpenAPIParser
+		f.openAPIParser = openapi.NewOpenAPIParser(f.openAPIGetter())
 	})
 
-	// Delegate to the OpenAPIGetter
-	return f.openAPIGetter.getter.Get()
+	// Delegate to the OpenAPIPArser
+	return f.openAPIParser.Parse()
+}
+
+func (f *factoryImpl) openAPIGetter() discovery.OpenAPISchemaInterface {
+	discovery, err := f.clientGetter.ToDiscoveryClient()
+	if err != nil {
+		return nil
+	}
+	f.getter.Do(func() {
+		f.oapi = openapi.NewOpenAPIGetter(discovery)
+	})
+
+	return f.oapi
 }

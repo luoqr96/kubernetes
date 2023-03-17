@@ -17,6 +17,7 @@ limitations under the License.
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,11 +35,11 @@ import (
 
 // Tests that the apiserver retries patches
 func TestPatchConflicts(t *testing.T) {
-	s, clientSet, closeFn := setup(t)
-	defer closeFn()
+	clientSet, _, tearDownFn := setup(t)
+	defer tearDownFn()
 
-	ns := framework.CreateTestingNamespace("status-code", s, t)
-	defer framework.DeleteTestingNamespace(ns, s, t)
+	ns := framework.CreateNamespaceOrDie(clientSet, "status-code", t)
+	defer framework.DeleteNamespaceOrDie(clientSet, ns, t)
 
 	numOfConcurrentPatches := 100
 
@@ -63,7 +64,10 @@ func TestPatchConflicts(t *testing.T) {
 	}
 
 	// Create the object we're going to conflict on
-	clientSet.CoreV1().Secrets(ns.Name).Create(secret)
+	_, err := clientSet.CoreV1().Secrets(ns.Name).Create(context.TODO(), secret, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := clientSet.CoreV1().RESTClient()
 
 	successes := int32(0)
@@ -83,7 +87,7 @@ func TestPatchConflicts(t *testing.T) {
 				Resource("secrets").
 				Name("test").
 				Body([]byte(fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}, "ownerReferences":[{"$patch":"delete","uid":"%s"}]}}`, labelName, value, UIDs[i]))).
-				Do().
+				Do(context.TODO()).
 				Get()
 
 			if apierrors.IsConflict(err) {

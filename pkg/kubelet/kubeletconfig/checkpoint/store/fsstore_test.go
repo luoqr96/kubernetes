@@ -18,9 +18,9 @@ package store
 
 import (
 	"fmt"
-	"io/ioutil"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -39,31 +39,25 @@ import (
 	utilfs "k8s.io/kubernetes/pkg/util/filesystem"
 )
 
-var testdir string
-
-func init() {
-	tmp, err := ioutil.TempDir("", "fsstore-test")
-	if err != nil {
-		panic(err)
-	}
-	testdir = tmp
-}
-
 func newInitializedFakeFsStore() (*fsStore, error) {
 	// Test with the default filesystem, the fake filesystem has an issue caused by afero: https://github.com/spf13/afero/issues/141
 	// The default filesystem also behaves more like production, so we should probably not mock the filesystem for unit tests.
-	fs := utilfs.DefaultFs{}
+	fs := &utilfs.DefaultFs{}
 
-	tmpdir, err := fs.TempDir(testdir, "store-")
+	tmpDir, err := fs.TempDir("", "fsstore-test-")
 	if err != nil {
 		return nil, err
 	}
 
-	store := NewFsStore(fs, tmpdir)
+	store := NewFsStore(fs, tmpDir)
 	if err := store.Initialize(); err != nil {
 		return nil, err
 	}
 	return store.(*fsStore), nil
+}
+
+func cleanupFakeFsStore(store *fsStore) {
+	_ = store.fs.RemoveAll(store.dir)
 }
 
 func TestFsStoreInitialize(t *testing.T) {
@@ -71,6 +65,7 @@ func TestFsStoreInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fsStore.Initialize() failed with error: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	// check that store.dir exists
 	if _, err := store.fs.Stat(store.dir); err != nil {
@@ -103,6 +98,7 @@ func TestFsStoreExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	// checkpoint a payload
 	const (
@@ -160,6 +156,7 @@ func TestFsStoreSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	nameTooLong := func() string {
 		s := ""
@@ -224,6 +221,8 @@ func TestFsStoreLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
+
 	// encode a kubelet configuration that has all defaults set
 	expect, err := newKubeletConfiguration()
 	if err != nil {
@@ -259,14 +258,20 @@ func TestFsStoreLoad(t *testing.T) {
 		uid             types.UID
 		resourceVersion string
 		err             string
+		skipOnWindows   bool
 	}{
-		{"checkpoint exists", uid, resourceVersion, ""},
-		{"checkpoint does not exist", "bogus-uid", "bogus-resourceVersion", "no checkpoint for source"},
-		{"ambiguous UID", "", "bogus-resourceVersion", "empty UID is ambiguous"},
-		{"ambiguous ResourceVersion", "bogus-uid", "", "empty ResourceVersion is ambiguous"},
+		{"checkpoint exists", uid, resourceVersion, "", true},
+		{"checkpoint does not exist", "bogus-uid", "bogus-resourceVersion", "no checkpoint for source", false},
+		{"ambiguous UID", "", "bogus-resourceVersion", "empty UID is ambiguous", false},
+		{"ambiguous ResourceVersion", "bogus-uid", "", "empty ResourceVersion is ambiguous", false},
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
+			// Skip tests that fail on Windows, as discussed during the SIG Testing meeting from January 10, 2023
+			if c.skipOnWindows && runtime.GOOS == "windows" {
+				t.Skip("Skipping test that fails on Windows")
+			}
+
 			source, _, err := checkpoint.NewRemoteConfigSource(&apiv1.NodeConfigSource{
 				ConfigMap: &apiv1.ConfigMapNodeConfigSource{
 					Name:             "name",
@@ -295,6 +300,7 @@ func TestFsStoreAssignedModified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	// create an empty assigned file, this is good enough for testing
 	saveTestSourceFile(t, store, assignedFile, nil)
@@ -321,6 +327,7 @@ func TestFsStoreAssigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	source, _, err := checkpoint.NewRemoteConfigSource(&apiv1.NodeConfigSource{
 		ConfigMap: &apiv1.ConfigMapNodeConfigSource{
@@ -364,6 +371,7 @@ func TestFsStoreLastKnownGood(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	source, _, err := checkpoint.NewRemoteConfigSource(&apiv1.NodeConfigSource{
 		ConfigMap: &apiv1.ConfigMapNodeConfigSource{
@@ -407,6 +415,7 @@ func TestFsStoreSetAssigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	cases := []struct {
 		desc   string
@@ -490,6 +499,7 @@ func TestFsStoreSetLastKnownGood(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	cases := []struct {
 		desc   string
@@ -573,6 +583,7 @@ func TestFsStoreReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error constructing store: %v", err)
 	}
+	defer cleanupFakeFsStore(store)
 
 	source, _, err := checkpoint.NewRemoteConfigSource(&apiv1.NodeConfigSource{ConfigMap: &apiv1.ConfigMapNodeConfigSource{
 		Name:             "name",
@@ -653,7 +664,7 @@ func mapFromCheckpoint(store *fsStore, uid, resourceVersion string) (map[string]
 	m := map[string]string{}
 	for _, f := range files {
 		// expect no subdirs, only regular files
-		if !f.Mode().IsRegular() {
+		if !f.Type().IsRegular() {
 			return nil, fmt.Errorf("expect only regular files in checkpoint dir %q", uid)
 		}
 		// read the file contents and build the map

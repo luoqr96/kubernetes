@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -21,11 +22,12 @@ package awsebs
 import (
 	"fmt"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 
-	"k8s.io/klog"
-	"k8s.io/utils/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 	utilstrings "k8s.io/utils/strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -65,6 +67,10 @@ func (plugin *awsElasticBlockStorePlugin) getVolumeSpecFromGlobalMapPath(volumeN
 	}
 	fullVolumeID := strings.TrimPrefix(globalMapPath, pluginDir) // /vol-XXXXXX
 	fullVolumeID = strings.TrimLeft(fullVolumeID, "/")           // vol-XXXXXX
+	// Windows paths have \\ instead.
+	if goruntime.GOOS == "windows" {
+		fullVolumeID = strings.TrimLeft(fullVolumeID, "\\") // vol-XXXXXX
+	}
 	vID, err := formatVolumeID(fullVolumeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get AWS volume id from map path %q: %v", globalMapPath, err)
@@ -98,7 +104,7 @@ func (plugin *awsElasticBlockStorePlugin) newBlockVolumeMapperInternal(spec *vol
 		partition = strconv.Itoa(int(ebs.Partition))
 	}
 
-	return &awsElasticBlockStoreMapper{
+	mapper := &awsElasticBlockStoreMapper{
 		awsElasticBlockStore: &awsElasticBlockStore{
 			podUID:    podUID,
 			volName:   spec.Name(),
@@ -108,7 +114,16 @@ func (plugin *awsElasticBlockStorePlugin) newBlockVolumeMapperInternal(spec *vol
 			mounter:   mounter,
 			plugin:    plugin,
 		},
-		readOnly: readOnly}, nil
+		readOnly: readOnly,
+	}
+
+	blockPath, err := mapper.GetGlobalMapPath(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get device path: %v", err)
+	}
+	mapper.MetricsProvider = volume.NewMetricsBlock(filepath.Join(blockPath, string(podUID)))
+
+	return mapper, nil
 }
 
 func (plugin *awsElasticBlockStorePlugin) NewBlockVolumeUnmapper(volName string, podUID types.UID) (volume.BlockVolumeUnmapper, error) {
@@ -141,7 +156,8 @@ var _ volume.BlockVolumeMapper = &awsElasticBlockStoreMapper{}
 
 // GetGlobalMapPath returns global map path and error
 // path: plugins/kubernetes.io/{PluginName}/volumeDevices/volumeID
-//       plugins/kubernetes.io/aws-ebs/volumeDevices/vol-XXXXXX
+//
+//	plugins/kubernetes.io/aws-ebs/volumeDevices/vol-XXXXXX
 func (ebs *awsElasticBlockStore) GetGlobalMapPath(spec *volume.Spec) (string, error) {
 	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
@@ -155,4 +171,10 @@ func (ebs *awsElasticBlockStore) GetGlobalMapPath(spec *volume.Spec) (string, er
 func (ebs *awsElasticBlockStore) GetPodDeviceMapPath() (string, string) {
 	name := awsElasticBlockStorePluginName
 	return ebs.plugin.host.GetPodVolumeDeviceDir(ebs.podUID, utilstrings.EscapeQualifiedName(name)), ebs.volName
+}
+
+// SupportsMetrics returns true for awsElasticBlockStore as it initializes the
+// MetricsProvider.
+func (ebs *awsElasticBlockStore) SupportsMetrics() bool {
+	return true
 }

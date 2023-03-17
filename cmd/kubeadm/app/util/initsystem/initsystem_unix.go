@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -22,6 +23,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/pkg/errors"
 )
 
 // OpenRCInitSystem defines openrc
@@ -83,10 +86,10 @@ func (sysd SystemdInitSystem) EnableCommand(service string) string {
 	return fmt.Sprintf("systemctl enable %s.service", service)
 }
 
-// reloadSystemd reloeads the systemd daemon
+// reloadSystemd reloads the systemd daemon
 func (sysd SystemdInitSystem) reloadSystemd() error {
 	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
-		return fmt.Errorf("failed to reload systemd: %v", err)
+		return errors.Wrap(err, "failed to reload systemd")
 	}
 	return nil
 }
@@ -160,5 +163,5 @@ func GetInitSystem() (InitSystem, error) {
 		return &OpenRCInitSystem{}, nil
 	}
 
-	return nil, fmt.Errorf("no supported init system detected, skipping checking for services")
+	return nil, errors.New("no supported init system detected, skipping checking for services")
 }

@@ -1,3 +1,4 @@
+//go:build providerless
 // +build providerless
 
 /*
@@ -24,10 +25,17 @@ import (
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
-func startLegacyIPAM(
+type fakeController struct {
+}
+
+func (f *fakeController) Run(stopCh <-chan struct{}) {
+	<-stopCh
+}
+
+func createLegacyIPAM(
 	ic *Controller,
 	nodeInformer coreinformers.NodeInformer,
 	cloud cloudprovider.Interface,
@@ -35,6 +43,7 @@ func startLegacyIPAM(
 	clusterCIDRs []*net.IPNet,
 	serviceCIDR *net.IPNet,
 	nodeCIDRMaskSizes []int,
-) {
+) *fakeController {
 	klog.Fatal("Error trying to Init(): legacy cloud provider support disabled at build time")
+	return &fakeController{}
 }

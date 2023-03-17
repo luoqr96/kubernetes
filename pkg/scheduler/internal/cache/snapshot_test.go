@@ -17,13 +17,17 @@ limitations under the License.
 package cache
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	"github.com/google/go-cmp/cmp"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
+	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
 const mb int64 = 1024 * 1024
@@ -32,7 +36,7 @@ func TestGetNodeImageStates(t *testing.T) {
 	tests := []struct {
 		node              *v1.Node
 		imageExistenceMap map[string]sets.String
-		expected          map[string]*schedulernodeinfo.ImageStateSummary
+		expected          map[string]*framework.ImageStateSummary
 	}{
 		{
 			node: &v1.Node{
@@ -58,7 +62,7 @@ func TestGetNodeImageStates(t *testing.T) {
 				"gcr.io/10:v1":  sets.NewString("node-0", "node-1"),
 				"gcr.io/200:v1": sets.NewString("node-0"),
 			},
-			expected: map[string]*schedulernodeinfo.ImageStateSummary{
+			expected: map[string]*framework.ImageStateSummary{
 				"gcr.io/10:v1": {
 					Size:     int64(10 * mb),
 					NumNodes: 2,
@@ -78,15 +82,17 @@ func TestGetNodeImageStates(t *testing.T) {
 				"gcr.io/10:v1":  sets.NewString("node-1"),
 				"gcr.io/200:v1": sets.NewString(),
 			},
-			expected: map[string]*schedulernodeinfo.ImageStateSummary{},
+			expected: map[string]*framework.ImageStateSummary{},
 		},
 	}
 
-	for _, test := range tests {
-		imageStates := getNodeImageStates(test.node, test.imageExistenceMap)
-		if !reflect.DeepEqual(test.expected, imageStates) {
-			t.Errorf("expected: %#v, got: %#v", test.expected, imageStates)
-		}
+	for i, test := range tests {
+		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+			imageStates := getNodeImageStates(test.node, test.imageExistenceMap)
+			if !reflect.DeepEqual(test.expected, imageStates) {
+				t.Errorf("expected: %#v, got: %#v", test.expected, imageStates)
+			}
+		})
 	}
 }
 
@@ -168,10 +174,270 @@ func TestCreateImageExistenceMap(t *testing.T) {
 		},
 	}
 
+	for i, test := range tests {
+		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+			imageMap := createImageExistenceMap(test.nodes)
+			if !reflect.DeepEqual(test.expected, imageMap) {
+				t.Errorf("expected: %#v, got: %#v", test.expected, imageMap)
+			}
+		})
+	}
+}
+
+func TestCreateUsedPVCSet(t *testing.T) {
+	tests := []struct {
+		name     string
+		pods     []*v1.Pod
+		expected sets.String
+	}{
+		{
+			name:     "empty pods list",
+			pods:     []*v1.Pod{},
+			expected: sets.NewString(),
+		},
+		{
+			name: "pods not scheduled",
+			pods: []*v1.Pod{
+				st.MakePod().Name("foo").Namespace("foo").Obj(),
+				st.MakePod().Name("bar").Namespace("bar").Obj(),
+			},
+			expected: sets.NewString(),
+		},
+		{
+			name: "scheduled pods that do not use any PVC",
+			pods: []*v1.Pod{
+				st.MakePod().Name("foo").Namespace("foo").Node("node-1").Obj(),
+				st.MakePod().Name("bar").Namespace("bar").Node("node-2").Obj(),
+			},
+			expected: sets.NewString(),
+		},
+		{
+			name: "scheduled pods that use PVC",
+			pods: []*v1.Pod{
+				st.MakePod().Name("foo").Namespace("foo").Node("node-1").PVC("pvc1").Obj(),
+				st.MakePod().Name("bar").Namespace("bar").Node("node-2").PVC("pvc2").Obj(),
+			},
+			expected: sets.NewString("foo/pvc1", "bar/pvc2"),
+		},
+	}
+
 	for _, test := range tests {
-		imageMap := createImageExistenceMap(test.nodes)
-		if !reflect.DeepEqual(test.expected, imageMap) {
-			t.Errorf("expected: %#v, got: %#v", test.expected, imageMap)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			usedPVCs := createUsedPVCSet(test.pods)
+			if diff := cmp.Diff(test.expected, usedPVCs); diff != "" {
+				t.Errorf("Unexpected usedPVCs (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestNewSnapshot(t *testing.T) {
+	podWithAnnotations := st.MakePod().Name("foo").Namespace("ns").Node("node-1").Annotations(map[string]string{"custom": "annotation"}).Obj()
+	podWithPort := st.MakePod().Name("foo").Namespace("foo").Node("node-0").ContainerPort([]v1.ContainerPort{{HostPort: 8080}}).Obj()
+	podWithAntiAffitiny := st.MakePod().Name("baz").Namespace("ns").PodAntiAffinity("another", &metav1.LabelSelector{MatchLabels: map[string]string{"another": "label"}}, st.PodAntiAffinityWithRequiredReq).Node("node-0").Obj()
+	podsWithAffitiny := []*v1.Pod{
+		st.MakePod().Name("bar").Namespace("ns").PodAffinity("baz", &metav1.LabelSelector{MatchLabels: map[string]string{"baz": "qux"}}, st.PodAffinityWithRequiredReq).Node("node-2").Obj(),
+		st.MakePod().Name("bar").Namespace("ns").PodAffinity("key", &metav1.LabelSelector{MatchLabels: map[string]string{"key": "value"}}, st.PodAffinityWithRequiredReq).Node("node-0").Obj(),
+	}
+	podsWithPVCs := []*v1.Pod{
+		st.MakePod().Name("foo").Namespace("foo").Node("node-0").PVC("pvc0").Obj(),
+		st.MakePod().Name("bar").Namespace("bar").Node("node-1").PVC("pvc1").Obj(),
+		st.MakePod().Name("baz").Namespace("baz").Node("node-2").PVC("pvc2").Obj(),
+	}
+	testCases := []struct {
+		name                         string
+		pods                         []*v1.Pod
+		nodes                        []*v1.Node
+		expectedNodesInfos           []*framework.NodeInfo
+		expectedNumNodes             int
+		expectedPodsWithAffinity     int
+		expectedPodsWithAntiAffinity int
+		expectedUsedPVCSet           sets.String
+	}{
+		{
+			name:  "no pods no nodes",
+			pods:  nil,
+			nodes: nil,
+		},
+		{
+			name: "single pod single node",
+			pods: []*v1.Pod{
+				podWithPort,
+			},
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+			},
+			expectedNodesInfos: []*framework.NodeInfo{
+				{
+					Pods: []*framework.PodInfo{
+						{Pod: podWithPort},
+					},
+				},
+			},
+			expectedNumNodes: 1,
+		},
+		{
+			name: "multiple nodes, pods with PVCs",
+			pods: podsWithPVCs,
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-2"}},
+			},
+			expectedNodesInfos: []*framework.NodeInfo{
+				{
+					Pods: []*framework.PodInfo{
+						{Pod: podsWithPVCs[0]},
+					},
+				},
+				{
+					Pods: []*framework.PodInfo{
+						{Pod: podsWithPVCs[1]},
+					},
+				},
+				{
+					Pods: []*framework.PodInfo{
+						{Pod: podsWithPVCs[2]},
+					},
+				},
+			},
+			expectedNumNodes:   3,
+			expectedUsedPVCSet: sets.NewString("foo/pvc0", "bar/pvc1", "baz/pvc2"),
+		},
+		{
+			name: "multiple nodes, pod with affinity",
+			pods: []*v1.Pod{
+				podWithAnnotations,
+				podsWithAffitiny[0],
+			},
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"baz": "qux"}}},
+			},
+			expectedNodesInfos: []*framework.NodeInfo{
+				{
+					Pods: []*framework.PodInfo{},
+				},
+				{
+					Pods: []*framework.PodInfo{
+						{Pod: podWithAnnotations},
+					},
+				},
+				{
+					Pods: []*framework.PodInfo{
+						{
+							Pod: podsWithAffitiny[0],
+							RequiredAffinityTerms: []framework.AffinityTerm{
+								{
+									Namespaces:        sets.NewString("ns"),
+									Selector:          labels.SelectorFromSet(map[string]string{"baz": "qux"}),
+									TopologyKey:       "baz",
+									NamespaceSelector: labels.Nothing(),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedNumNodes:         3,
+			expectedPodsWithAffinity: 1,
+		},
+		{
+			name: "multiple nodes, pod with affinity, pod with anti-affinity",
+			pods: []*v1.Pod{
+				podsWithAffitiny[1],
+				podWithAntiAffitiny,
+			},
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"key": "value"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"another": "label"}}},
+			},
+			expectedNodesInfos: []*framework.NodeInfo{
+				{
+					Pods: []*framework.PodInfo{
+						{
+							Pod: podsWithAffitiny[1],
+							RequiredAffinityTerms: []framework.AffinityTerm{
+								{
+									Namespaces:        sets.NewString("ns"),
+									Selector:          labels.SelectorFromSet(map[string]string{"key": "value"}),
+									TopologyKey:       "key",
+									NamespaceSelector: labels.Nothing(),
+								},
+							},
+						},
+						{
+							Pod: podWithAntiAffitiny,
+							RequiredAntiAffinityTerms: []framework.AffinityTerm{
+								{
+									Namespaces:        sets.NewString("ns"),
+									Selector:          labels.SelectorFromSet(map[string]string{"another": "label"}),
+									TopologyKey:       "another",
+									NamespaceSelector: labels.Nothing(),
+								},
+							},
+						},
+					},
+				},
+				{
+					Pods: []*framework.PodInfo{},
+				},
+			},
+			expectedNumNodes:             2,
+			expectedPodsWithAffinity:     1,
+			expectedPodsWithAntiAffinity: 1,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := NewSnapshot(test.pods, test.nodes)
+
+			if test.expectedNumNodes != snapshot.NumNodes() {
+				t.Errorf("unexpected number of nodes, want: %v, got: %v", test.expectedNumNodes, snapshot.NumNodes())
+			}
+
+			for i, node := range test.nodes {
+				info, err := snapshot.Get(node.Name)
+				if err != nil {
+					t.Errorf("unexpected error but got %s", err)
+				}
+				if info == nil {
+					t.Error("node infos should not be nil")
+				}
+				for j := range test.expectedNodesInfos[i].Pods {
+					if diff := cmp.Diff(test.expectedNodesInfos[i].Pods[j], info.Pods[j]); diff != "" {
+						t.Errorf("Unexpected PodInfo (-want +got):\n%s", diff)
+					}
+				}
+			}
+
+			affinityList, err := snapshot.HavePodsWithAffinityList()
+			if err != nil {
+				t.Errorf("unexpected error but got %s", err)
+			}
+			if test.expectedPodsWithAffinity != len(affinityList) {
+				t.Errorf("unexpected affinityList number, want: %v, got: %v", test.expectedPodsWithAffinity, len(affinityList))
+			}
+
+			antiAffinityList, err := snapshot.HavePodsWithRequiredAntiAffinityList()
+			if err != nil {
+				t.Errorf("unexpected error but got %s", err)
+			}
+			if test.expectedPodsWithAntiAffinity != len(antiAffinityList) {
+				t.Errorf("unexpected antiAffinityList number, want: %v, got: %v", test.expectedPodsWithAntiAffinity, len(antiAffinityList))
+			}
+
+			for key := range test.expectedUsedPVCSet {
+				if !snapshot.IsPVCUsedByPods(key) {
+					t.Errorf("unexpected IsPVCUsedByPods for %s, want: true, got: false", key)
+				}
+			}
+
+			if diff := cmp.Diff(test.expectedUsedPVCSet, snapshot.usedPVCSet); diff != "" {
+				t.Errorf("Unexpected usedPVCSet (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

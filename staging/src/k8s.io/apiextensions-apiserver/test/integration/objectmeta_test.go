@@ -17,34 +17,32 @@ limitations under the License.
 package integration
 
 import (
+	"context"
 	"path"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/pkg/transport"
+	"github.com/google/go-cmp/cmp"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"sigs.k8s.io/yaml"
 
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
-	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	serveroptions "k8s.io/apiextensions-apiserver/pkg/cmd/server/options"
-	"k8s.io/apiextensions-apiserver/pkg/features"
-	"k8s.io/apiextensions-apiserver/test/integration/fixtures"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/json"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/dynamic"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/utils/pointer"
+
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	serveroptions "k8s.io/apiextensions-apiserver/pkg/cmd/server/options"
+	"k8s.io/apiextensions-apiserver/test/integration/fixtures"
 )
 
 func TestPostInvalidObjectMeta(t *testing.T) {
@@ -54,8 +52,8 @@ func TestPostInvalidObjectMeta(t *testing.T) {
 	}
 	defer tearDown()
 
-	noxuDefinition := fixtures.NewNoxuCustomResourceDefinition(apiextensionsv1beta1.NamespaceScoped)
-	noxuDefinition, err = fixtures.CreateNewCustomResourceDefinition(noxuDefinition, apiExtensionClient, dynamicClient)
+	noxuDefinition := fixtures.NewNoxuV1CustomResourceDefinition(apiextensionsv1.NamespaceScoped)
+	noxuDefinition, err = fixtures.CreateNewV1CustomResourceDefinition(noxuDefinition, apiExtensionClient, dynamicClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,11 +114,11 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	noxuDefinition := fixtures.NewNoxuCustomResourceDefinition(apiextensionsv1beta1.NamespaceScoped)
-	noxuDefinition.Spec.Validation = &apiextensionsv1beta1.CustomResourceValidation{
-		OpenAPIV3Schema: &apiextensionsv1beta1.JSONSchemaProps{
+	noxuDefinition := fixtures.NewNoxuV1CustomResourceDefinition(apiextensionsv1.NamespaceScoped)
+	noxuDefinition.Spec.Versions[0].Schema = &apiextensionsv1.CustomResourceValidation{
+		OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
 			Type: "object",
-			Properties: map[string]apiextensionsv1beta1.JSONSchemaProps{
+			Properties: map[string]apiextensionsv1.JSONSchemaProps{
 				"embedded": {
 					Type:                   "object",
 					XEmbeddedResource:      true,
@@ -129,12 +127,15 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 			},
 		},
 	}
-	noxuDefinition, err = fixtures.CreateNewCustomResourceDefinition(noxuDefinition, apiExtensionClient, dynamicClient)
+	noxuDefinition, err = fixtures.CreateNewV1CustomResourceDefinition(noxuDefinition, apiExtensionClient, dynamicClient)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	RESTOptionsGetter := serveroptions.NewCRDRESTOptionsGetter(*options.RecommendedOptions.Etcd)
+	RESTOptionsGetter, err := serveroptions.NewCRDRESTOptionsGetter(*options.RecommendedOptions.Etcd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	restOptions, err := RESTOptionsGetter.GetRESTOptions(schema.GroupResource{Group: noxuDefinition.Spec.Group, Resource: noxuDefinition.Spec.Names.Plural})
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +185,7 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 
 	t.Logf("Checking that invalid objects can be deleted")
 	noxuResourceClient := newNamespacedCustomResourceClient("default", dynamicClient, noxuDefinition)
-	if err := noxuResourceClient.Delete("foo", &metav1.DeleteOptions{}); err != nil {
+	if err := noxuResourceClient.Delete(context.TODO(), "foo", metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("Unexpected delete error %v", err)
 	}
 	if _, err := etcdclient.Put(ctx, key, string(val)); err != nil {
@@ -192,7 +193,7 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 	}
 
 	t.Logf("Checking that ObjectMeta is pruned from unknown fields")
-	obj, err := noxuResourceClient.Get("foo", metav1.GetOptions{})
+	obj, err := noxuResourceClient.Get(context.TODO(), "foo", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -252,7 +253,7 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 
 	t.Logf("Trying to fail on updating with invalid labels")
 	unstructured.SetNestedField(obj.Object, "changed", "metadata", "labels", "something")
-	if got, err := noxuResourceClient.Update(obj, metav1.UpdateOptions{}); err == nil {
+	if got, err := noxuResourceClient.Update(context.TODO(), obj, metav1.UpdateOptions{}); err == nil {
 		objJSON, _ := json.Marshal(obj.Object)
 		gotJSON, _ := json.Marshal(got.Object)
 		t.Fatalf("Expected update error, but didn't get one\nin: %s\nresponse: %v", string(objJSON), string(gotJSON))
@@ -260,7 +261,7 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 
 	t.Logf("Trying to fail on updating with invalid embedded label")
 	unstructured.SetNestedField(obj.Object, "fixed", "metadata", "labels", "invalid")
-	if got, err := noxuResourceClient.Update(obj, metav1.UpdateOptions{}); err == nil {
+	if got, err := noxuResourceClient.Update(context.TODO(), obj, metav1.UpdateOptions{}); err == nil {
 		objJSON, _ := json.Marshal(obj.Object)
 		gotJSON, _ := json.Marshal(got.Object)
 		t.Fatalf("Expected update error, but didn't get one\nin: %s\nresponse: %v", string(objJSON), string(gotJSON))
@@ -268,13 +269,13 @@ func TestInvalidObjectMetaInStorage(t *testing.T) {
 
 	t.Logf("Fixed all labels and update should work")
 	unstructured.SetNestedField(obj.Object, "fixed", "embedded", "metadata", "labels", "invalid")
-	if _, err := noxuResourceClient.Update(obj, metav1.UpdateOptions{}); err != nil {
+	if _, err := noxuResourceClient.Update(context.TODO(), obj, metav1.UpdateOptions{}); err != nil {
 		t.Errorf("Unexpected update error with fixed labels: %v", err)
 	}
 
 	t.Logf("Trying to fail on updating with wrongly-typed embedded label")
 	unstructured.SetNestedField(obj.Object, int64(42), "embedded", "metadata", "labels", "invalid")
-	if got, err := noxuResourceClient.Update(obj, metav1.UpdateOptions{}); err == nil {
+	if got, err := noxuResourceClient.Update(context.TODO(), obj, metav1.UpdateOptions{}); err == nil {
 		objJSON, _ := json.Marshal(obj.Object)
 		gotJSON, _ := json.Marshal(got.Object)
 		t.Fatalf("Expected update error, but didn't get one\nin: %s\nresponse: %v", string(objJSON), string(gotJSON))
@@ -431,8 +432,6 @@ invalidDefaults: {}
 )
 
 func TestEmbeddedResources(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CustomResourceDefaulting, true)()
-
 	tearDownFn, apiExtensionClient, dynamicClient, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -457,7 +456,7 @@ func TestEmbeddedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	unstructured.SetNestedField(foo.Object, "foo", "metadata", "name")
-	foo, err = fooClient.Create(foo, metav1.CreateOptions{})
+	foo, err = fooClient.Create(context.TODO(), foo, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Unable to create CR: %v", err)
 	}
@@ -470,7 +469,7 @@ func TestEmbeddedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(expected, foo.Object) {
-		t.Errorf("unexpected diff: %s", diff.ObjectDiff(expected, foo.Object))
+		t.Errorf("unexpected diff: %s", cmp.Diff(expected, foo.Object))
 	}
 
 	t.Logf("Trying to create wrongly typed CR")
@@ -479,7 +478,7 @@ func TestEmbeddedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	unstructured.SetNestedField(wronglyTyped.Object, "invalid", "metadata", "name")
-	_, err = fooClient.Create(wronglyTyped, metav1.CreateOptions{})
+	_, err = fooClient.Create(context.TODO(), wronglyTyped, metav1.CreateOptions{})
 	if err == nil {
 		t.Fatal("Expected creation to fail, but didn't")
 	}
@@ -500,7 +499,7 @@ func TestEmbeddedResources(t *testing.T) {
 	}
 	unstructured.SetNestedField(invalid.Object, "invalid", "metadata", "name")
 	unstructured.SetNestedField(invalid.Object, "x y", "metadata", "labels", "foo")
-	_, err = fooClient.Create(invalid, metav1.CreateOptions{})
+	_, err = fooClient.Create(context.TODO(), invalid, metav1.CreateOptions{})
 	if err == nil {
 		t.Fatal("Expected creation to fail, but didn't")
 	}
@@ -527,7 +526,7 @@ func TestEmbeddedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	unstructured.SetNestedField(valid.Object, "valid", "metadata", "name")
-	valid, err = fooClient.Create(valid, metav1.CreateOptions{})
+	valid, err = fooClient.Create(context.TODO(), valid, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Unable to create CR: %v", err)
 	}
@@ -538,7 +537,7 @@ func TestEmbeddedResources(t *testing.T) {
 		valid.Object[k] = v
 	}
 	unstructured.SetNestedField(valid.Object, "x y", "metadata", "labels", "foo")
-	if _, err = fooClient.Update(valid, metav1.UpdateOptions{}); err == nil {
+	if _, err = fooClient.Update(context.TODO(), valid, metav1.UpdateOptions{}); err == nil {
 		t.Fatal("Expected update error, but got none")
 	}
 	t.Logf("Update failed with: %v", err)

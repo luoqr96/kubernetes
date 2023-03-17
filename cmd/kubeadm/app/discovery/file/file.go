@@ -17,6 +17,7 @@ limitations under the License.
 package file
 
 import (
+	"context"
 	"time"
 
 	"github.com/pkg/errors"
@@ -28,7 +29,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
 )
@@ -36,22 +38,22 @@ import (
 // RetrieveValidatedConfigInfo connects to the API Server and makes sure it can talk
 // securely to the API Server using the provided CA cert and
 // optionally refreshes the cluster-info information from the cluster-info ConfigMap
-func RetrieveValidatedConfigInfo(filepath, clustername string, discoveryTimeout time.Duration) (*clientcmdapi.Config, error) {
+func RetrieveValidatedConfigInfo(filepath string, discoveryTimeout time.Duration) (*clientcmdapi.Config, error) {
 	config, err := clientcmd.LoadFromFile(filepath)
 	if err != nil {
 		return nil, err
 	}
-	return ValidateConfigInfo(config, clustername, discoveryTimeout)
+	return ValidateConfigInfo(config, discoveryTimeout)
 }
 
 // ValidateConfigInfo connects to the API Server and makes sure it can talk
 // securely to the API Server using the provided CA cert/client certificates  and
 // optionally refreshes the cluster-info information from the cluster-info ConfigMap
-func ValidateConfigInfo(config *clientcmdapi.Config, clustername string, discoveryTimeout time.Duration) (*clientcmdapi.Config, error) {
+func ValidateConfigInfo(config *clientcmdapi.Config, discoveryTimeout time.Duration) (*clientcmdapi.Config, error) {
 	if len(config.Clusters) < 1 {
 		return nil, errors.New("the provided kubeconfig file must have at least one Cluster defined")
 	}
-	currentCluster := kubeconfigutil.GetClusterFromKubeConfig(config)
+	currentClusterName, currentCluster := kubeconfigutil.GetClusterFromKubeConfig(config)
 	if currentCluster == nil {
 		return nil, errors.New("the provided kubeconfig file must have a unnamed Cluster or a CurrentContext that specifies a non-nil Cluster")
 	}
@@ -76,15 +78,6 @@ func ValidateConfigInfo(config *clientcmdapi.Config, clustername string, discove
 	} else {
 		// If the discovery file config does not contains authentication credentials
 		klog.V(1).Info("[discovery] Discovery file does not contains authentication credentials, using unauthenticated request for validating TLS connection")
-
-		// Create a new kubeconfig object from the discovery file config, with only the server and the CA cert.
-		// NB. We do this in order to not pick up other possible misconfigurations in the clusterinfo file
-		config = kubeconfigutil.CreateBasic(
-			currentCluster.Server,
-			clustername,
-			"", // no user provided
-			currentCluster.CertificateAuthorityData,
-		)
 	}
 
 	// Try to read the cluster-info config map; this step was required by the original design in order
@@ -100,7 +93,7 @@ func ValidateConfigInfo(config *clientcmdapi.Config, clustername string, discove
 
 	err = wait.Poll(constants.DiscoveryRetryInterval, discoveryTimeout, func() (bool, error) {
 		var err error
-		clusterinfoCM, err = client.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+		clusterinfoCM, err = client.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(context.TODO(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsForbidden(err) {
 				// If the request is unauthorized, the cluster admin has not granted access to the cluster info configmap for unauthenticated users
@@ -129,11 +122,16 @@ func ValidateConfigInfo(config *clientcmdapi.Config, clustername string, discove
 		return config, nil
 	}
 
-	refreshedCluster := kubeconfigutil.GetClusterFromKubeConfig(refreshedBaseKubeConfig)
-	currentCluster.Server = refreshedCluster.Server
-	currentCluster.CertificateAuthorityData = refreshedCluster.CertificateAuthorityData
+	_, refreshedCluster := kubeconfigutil.GetClusterFromKubeConfig(refreshedBaseKubeConfig)
+	if currentCluster.Server != refreshedCluster.Server {
+		klog.Warningf("[discovery] the API Server endpoint %q in use is different from the endpoint %q which defined in the %s ConfigMap", currentCluster.Server, refreshedCluster.Server, bootstrapapi.ConfigMapClusterInfo)
+	}
 
-	klog.V(1).Infof("[discovery] Synced Server and CertificateAuthorityData from the %s ConfigMap", bootstrapapi.ConfigMapClusterInfo)
+	if len(currentCluster.CertificateAuthorityData) == 0 && len(refreshedCluster.CertificateAuthorityData) > 0 {
+		config.Clusters[currentClusterName].CertificateAuthorityData = refreshedCluster.CertificateAuthorityData
+		klog.V(1).Infof("[discovery] Synced CertificateAuthorityData from the %s ConfigMap", bootstrapapi.ConfigMapClusterInfo)
+	}
+
 	return config, nil
 }
 

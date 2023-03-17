@@ -17,14 +17,18 @@ limitations under the License.
 package upgrade
 
 import (
-	"fmt"
+	"context"
+
 	"github.com/pkg/errors"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
+	pkgversion "k8s.io/apimachinery/pkg/version"
+	fakediscovery "k8s.io/client-go/discovery/fake"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/version"
+
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 )
 
@@ -55,9 +59,24 @@ func NewKubeVersionGetter(client clientset.Interface) VersionGetter {
 
 // ClusterVersion gets API server version
 func (g *KubeVersionGetter) ClusterVersion() (string, *versionutil.Version, error) {
-	clusterVersionInfo, err := g.client.Discovery().ServerVersion()
-	if err != nil {
-		return "", nil, errors.Wrap(err, "Couldn't fetch cluster version from the API Server")
+	var (
+		clusterVersionInfo *pkgversion.Info
+		err                error
+	)
+	// If we are dry-running, do not attempt to fetch the /version resource and just return
+	// the stored FakeServerVersion, which is done when constructing the dry-run client in
+	// common.go#getClient()
+	// The problem here is that during upgrade dry-run client reactors are backed by a dynamic client
+	// via NewClientBackedDryRunGetterFromKubeconfig() and for GetActions there seems to be no analog to
+	// Discovery().Serverversion() resource for a dynamic client(?).
+	fakeclientDiscovery, ok := g.client.Discovery().(*fakediscovery.FakeDiscovery)
+	if ok {
+		clusterVersionInfo = fakeclientDiscovery.FakedServerVersion
+	} else {
+		clusterVersionInfo, err = g.client.Discovery().ServerVersion()
+		if err != nil {
+			return "", nil, errors.Wrap(err, "Couldn't fetch cluster version from the API Server")
+		}
 	}
 
 	clusterVersion, err := versionutil.ParseSemantic(clusterVersionInfo.String())
@@ -94,7 +113,7 @@ func (g *KubeVersionGetter) VersionFromCILabel(ciVersionLabel, description strin
 
 // KubeletVersions gets the versions of the kubelets in the cluster
 func (g *KubeVersionGetter) KubeletVersions() (map[string]uint16, error) {
-	nodes, err := g.client.CoreV1().Nodes().List(metav1.ListOptions{})
+	nodes, err := g.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, errors.New("couldn't list all nodes in cluster")
 	}
@@ -103,7 +122,7 @@ func (g *KubeVersionGetter) KubeletVersions() (map[string]uint16, error) {
 
 // computeKubeletVersions returns a string-int map that describes how many nodes are of a specific version
 func computeKubeletVersions(nodes []v1.Node) map[string]uint16 {
-	kubeletVersions := map[string]uint16{}
+	kubeletVersions := make(map[string]uint16)
 	for _, node := range nodes {
 		kver := node.Status.NodeInfo.KubeletVersion
 		if _, found := kubeletVersions[kver]; !found {
@@ -133,11 +152,7 @@ func NewOfflineVersionGetter(versionGetter VersionGetter, version string) Versio
 // VersionFromCILabel will return the version that was passed into the struct
 func (o *OfflineVersionGetter) VersionFromCILabel(ciVersionLabel, description string) (string, *versionutil.Version, error) {
 	if o.version == "" {
-		versionStr, version, err := o.VersionGetter.VersionFromCILabel(ciVersionLabel, description)
-		if err == nil {
-			fmt.Printf("[upgrade/versions] Latest %s: %s\n", description, versionStr)
-		}
-		return versionStr, version, err
+		return o.VersionGetter.VersionFromCILabel(ciVersionLabel, description)
 	}
 	ver, err := versionutil.ParseSemantic(o.version)
 	if err != nil {

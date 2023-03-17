@@ -17,14 +17,14 @@ limitations under the License.
 package framework
 
 import (
-	"k8s.io/api/core/v1"
+	"context"
+
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	"k8s.io/klog/v2"
 	testutils "k8s.io/kubernetes/test/utils"
-
-	"k8s.io/klog"
 )
 
 const (
@@ -58,7 +58,7 @@ func NewIntegrationTestNodePreparerWithNodeSpec(client clientset.Interface, coun
 }
 
 // PrepareNodes prepares countToStrategy test nodes.
-func (p *IntegrationTestNodePreparer) PrepareNodes() error {
+func (p *IntegrationTestNodePreparer) PrepareNodes(ctx context.Context, nextNodeIndex int) error {
 	numNodes := 0
 	for _, v := range p.countToStrategy {
 		numNodes += v.Count
@@ -89,8 +89,8 @@ func (p *IntegrationTestNodePreparer) PrepareNodes() error {
 	for i := 0; i < numNodes; i++ {
 		var err error
 		for retry := 0; retry < retries; retry++ {
-			_, err = p.client.CoreV1().Nodes().Create(baseNode)
-			if err == nil || !testutils.IsRetryableAPIError(err) {
+			_, err = p.client.CoreV1().Nodes().Create(ctx, baseNode, metav1.CreateOptions{})
+			if err == nil {
 				break
 			}
 		}
@@ -99,16 +99,14 @@ func (p *IntegrationTestNodePreparer) PrepareNodes() error {
 		}
 	}
 
-	nodes, err := e2enode.GetReadySchedulableNodes(p.client)
+	nodes, err := waitListAllNodes(p.client)
 	if err != nil {
 		klog.Fatalf("Error listing nodes: %v", err)
 	}
-	index := 0
-	sum := 0
+	index := nextNodeIndex
 	for _, v := range p.countToStrategy {
-		sum += v.Count
-		for ; index < sum; index++ {
-			if err := testutils.DoPrepareNode(p.client, &nodes.Items[index], v.Strategy); err != nil {
+		for i := 0; i < v.Count; i, index = i+1, index+1 {
+			if err := testutils.DoPrepareNode(ctx, p.client, &nodes.Items[index], v.Strategy); err != nil {
 				klog.Errorf("Aborting node preparation: %v", err)
 				return err
 			}
@@ -118,15 +116,19 @@ func (p *IntegrationTestNodePreparer) PrepareNodes() error {
 }
 
 // CleanupNodes deletes existing test nodes.
-func (p *IntegrationTestNodePreparer) CleanupNodes() error {
-	nodes, err := e2enode.GetReadySchedulableNodes(p.client)
+func (p *IntegrationTestNodePreparer) CleanupNodes(ctx context.Context) error {
+	// TODO(#93794): make CleanupNodes only clean up the nodes created by this
+	// IntegrationTestNodePreparer to make this more intuitive.
+	nodes, err := waitListAllNodes(p.client)
 	if err != nil {
 		klog.Fatalf("Error listing nodes: %v", err)
 	}
+	var errRet error
 	for i := range nodes.Items {
-		if err := p.client.CoreV1().Nodes().Delete(nodes.Items[i].Name, &metav1.DeleteOptions{}); err != nil {
+		if err := p.client.CoreV1().Nodes().Delete(ctx, nodes.Items[i].Name, metav1.DeleteOptions{}); err != nil {
 			klog.Errorf("Error while deleting Node: %v", err)
+			errRet = err
 		}
 	}
-	return nil
+	return errRet
 }

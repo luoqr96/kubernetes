@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -54,6 +55,8 @@ var (
 		"loadBalancerRateLimit": {
 			"cloudProviderRatelimit": false,
 		},
+		"networkResourceTenantId": "networkResourceTenantId",
+		"networkResourceSubscriptionId": "networkResourceSubscriptionId",
 		"availabilitySetNodesCacheTTLInSeconds": 100,
 		"vmssCacheTTLInSeconds": 100,
 		"vmssVirtualMachinesCacheTTLInSeconds": 100,
@@ -92,14 +95,16 @@ var (
 func TestParseConfig(t *testing.T) {
 	expected := &Config{
 		AzureAuthConfig: auth.AzureAuthConfig{
-			AADClientCertPassword:       "aadClientCertPassword",
-			AADClientCertPath:           "aadClientCertPath",
-			AADClientID:                 "aadClientId",
-			AADClientSecret:             "aadClientSecret",
-			Cloud:                       "AzurePublicCloud",
-			SubscriptionID:              "subscriptionId",
-			TenantID:                    "tenantId",
-			UseManagedIdentityExtension: true,
+			AADClientCertPassword:         "aadClientCertPassword",
+			AADClientCertPath:             "aadClientCertPath",
+			AADClientID:                   "aadClientId",
+			AADClientSecret:               "aadClientSecret",
+			Cloud:                         "AzurePublicCloud",
+			SubscriptionID:                "subscriptionId",
+			TenantID:                      "tenantId",
+			UseManagedIdentityExtension:   true,
+			NetworkResourceTenantID:       "networkResourceTenantId",
+			NetworkResourceSubscriptionID: "networkResourceSubscriptionId",
 		},
 		CloudProviderBackoff:         true,
 		CloudProviderBackoffDuration: 1,

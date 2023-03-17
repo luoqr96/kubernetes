@@ -36,6 +36,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/authentication/token/cache"
 	"k8s.io/apiserver/pkg/authentication/user"
+	webhookutil "k8s.io/apiserver/pkg/util/webhook"
 	v1 "k8s.io/client-go/tools/clientcmd/api/v1"
 )
 
@@ -195,12 +196,20 @@ func newV1beta1TokenAuthenticator(serverURL string, clientCert, clientKey, ca []
 		return nil, err
 	}
 
-	c, err := tokenReviewInterfaceFromKubeconfig(p, "v1beta1")
+	clientConfig, err := webhookutil.LoadKubeconfig(p, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	authn, err := newWithBackoff(c, 0, implicitAuds)
+	c, err := tokenReviewInterfaceFromConfig(clientConfig, "v1beta1", testRetryBackoff)
+	if err != nil {
+		return nil, err
+	}
+
+	authn, err := newWithBackoff(c, testRetryBackoff, implicitAuds, 10*time.Second, AuthenticatorMetrics{
+		RecordRequestTotal:   noopMetrics{}.RequestTotal,
+		RecordRequestLatency: noopMetrics{}.RequestLatency,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +490,7 @@ func TestV1beta1WebhookTokenAuthenticator(t *testing.T) {
 			expectedAuthenticated: false,
 		},
 	}
-	token := "my-s3cr3t-t0ken"
+	token := "my-s3cr3t-t0ken" // Fake token for testing.
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
 			wh, err := newV1beta1TokenAuthenticator(s.URL, clientCert, clientKey, caCert, 0, tt.implicitAuds)

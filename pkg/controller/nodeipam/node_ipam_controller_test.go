@@ -1,3 +1,6 @@
+//go:build !providerless
+// +build !providerless
+
 /*
 Copyright 2018 The Kubernetes Authors.
 
@@ -23,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
@@ -45,6 +48,7 @@ func newTestNodeIpamController(clusterCIDR []*net.IPNet, serviceCIDR *net.IPNet,
 	fakeClient := &fake.Clientset{}
 	fakeInformerFactory := informers.NewSharedInformerFactory(fakeClient, controller.NoResyncPeriodFunc())
 	fakeNodeInformer := fakeInformerFactory.Core().V1().Nodes()
+	fakeClusterCIDRInformer := fakeInformerFactory.Networking().V1alpha1().ClusterCIDRs()
 
 	for _, node := range fakeNodeHandler.Existing {
 		fakeNodeInformer.Informer().GetStore().Add(node)
@@ -52,7 +56,7 @@ func newTestNodeIpamController(clusterCIDR []*net.IPNet, serviceCIDR *net.IPNet,
 
 	fakeGCE := gce.NewFakeGCECloud(gce.DefaultTestClusterValues())
 	return NewNodeIpamController(
-		fakeNodeInformer, fakeGCE, clientSet,
+		fakeNodeInformer, fakeClusterCIDRInformer, fakeGCE, clientSet,
 		clusterCIDR, serviceCIDR, secondaryServiceCIDR, nodeCIDRMaskSizes, allocatorType,
 	)
 }
@@ -75,6 +79,9 @@ func TestNewNodeIpamControllerWithCIDRMasks(t *testing.T) {
 		{"valid_range_allocator_dualstack", "10.0.0.0/21,2000::/10", "10.1.0.0/21", emptyServiceCIDR, []int{24, 98}, ipam.RangeAllocatorType, false},
 		{"valid_range_allocator_dualstack_dualstackservice", "10.0.0.0/21,2000::/10", "10.1.0.0/21", "3000::/10", []int{24, 98}, ipam.RangeAllocatorType, false},
 
+		{"valid_multi_cidr_range_allocator", "10.0.0.0/21", "10.1.0.0/21", emptyServiceCIDR, []int{24}, ipam.MultiCIDRRangeAllocatorType, false},
+		{"valid_multi_cidr_range_allocator_dualstack", "10.0.0.0/21,2000::/10", "10.1.0.0/21", emptyServiceCIDR, []int{24, 98}, ipam.MultiCIDRRangeAllocatorType, false},
+
 		{"valid_cloud_allocator", "10.0.0.0/21", "10.1.0.0/21", emptyServiceCIDR, []int{24}, ipam.CloudAllocatorType, false},
 		{"valid_ipam_from_cluster", "10.0.0.0/21", "10.1.0.0/21", emptyServiceCIDR, []int{24}, ipam.IPAMFromClusterAllocatorType, false},
 		{"valid_ipam_from_cloud", "10.0.0.0/21", "10.1.0.0/21", emptyServiceCIDR, []int{24}, ipam.IPAMFromCloudAllocatorType, false},
@@ -87,8 +94,8 @@ func TestNewNodeIpamControllerWithCIDRMasks(t *testing.T) {
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			clusterCidrs, _ := netutils.ParseCIDRs(strings.Split(tc.clusterCIDR, ","))
-			_, serviceCIDRIpNet, _ := net.ParseCIDR(tc.serviceCIDR)
-			_, secondaryServiceCIDRIpNet, _ := net.ParseCIDR(tc.secondaryServiceCIDR)
+			_, serviceCIDRIpNet, _ := netutils.ParseCIDRSloppy(tc.serviceCIDR)
+			_, secondaryServiceCIDRIpNet, _ := netutils.ParseCIDRSloppy(tc.secondaryServiceCIDR)
 
 			if os.Getenv("EXIT_ON_FATAL") == "1" {
 				// This is the subprocess which runs the actual code.

@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -27,14 +28,14 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-06-01/network"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
-	"github.com/Azure/go-autorest/autorest/to"
 
 	"k8s.io/client-go/util/flowcontrol"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	azclients "k8s.io/legacy-cloud-providers/azure/clients"
 	"k8s.io/legacy-cloud-providers/azure/clients/armclient"
 	"k8s.io/legacy-cloud-providers/azure/metrics"
 	"k8s.io/legacy-cloud-providers/azure/retry"
+	"k8s.io/utils/pointer"
 )
 
 var _ Interface = &Client{}
@@ -56,8 +57,8 @@ type Client struct {
 // New creates a new PublicIPAddress client with ratelimiting.
 func New(config *azclients.ClientConfig) *Client {
 	baseURI := config.ResourceManagerEndpoint
-	authorizer := autorest.NewBearerAuthorizer(config.ServicePrincipalToken)
-	armClient := armclient.New(authorizer, baseURI, "", APIVersion, config.Location, config.Backoff)
+	authorizer := config.Authorizer
+	armClient := armclient.New(authorizer, baseURI, config.UserAgent, APIVersion, config.Location, config.Backoff)
 	rateLimiterReader, rateLimiterWriter := azclients.NewRateLimiter(config.RateLimitConfig)
 
 	klog.V(2).Infof("Azure PublicIPAddressesClient (read ops) using rate limit config: QPS=%g, bucket=%d",
@@ -265,8 +266,14 @@ func (c *Client) listPublicIPAddress(ctx context.Context, resourceGroupName stri
 		return result, retry.GetError(resp, err)
 	}
 
-	for page.NotDone() {
-		result = append(result, *page.Response().Value...)
+	for {
+		result = append(result, page.Values()...)
+
+		// Abort the loop when there's no nextLink in the response.
+		if pointer.StringDeref(page.Response().NextLink, "") == "" {
+			break
+		}
+
 		if err = page.NextWithContext(ctx); err != nil {
 			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "publicip.list.next", resourceID, err)
 			return result, retry.GetError(page.Response().Response.Response, err)
@@ -400,12 +407,12 @@ func (c *Client) listResponder(resp *http.Response) (result network.PublicIPAddr
 // publicIPAddressListResultPreparer prepares a request to retrieve the next set of results.
 // It returns nil if no more results exist.
 func (c *Client) publicIPAddressListResultPreparer(ctx context.Context, lr network.PublicIPAddressListResult) (*http.Request, error) {
-	if lr.NextLink == nil || len(to.String(lr.NextLink)) < 1 {
+	if lr.NextLink == nil || len(pointer.StringDeref(lr.NextLink, "")) < 1 {
 		return nil, nil
 	}
 
 	decorators := []autorest.PrepareDecorator{
-		autorest.WithBaseURL(to.String(lr.NextLink)),
+		autorest.WithBaseURL(pointer.StringDeref(lr.NextLink, "")),
 	}
 	return c.armClient.PrepareGetRequest(ctx, decorators...)
 }

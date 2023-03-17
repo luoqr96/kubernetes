@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -24,18 +25,19 @@ import (
 	"sort"
 	"strconv"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	gcecloud "k8s.io/legacy-cloud-providers/gce"
 
 	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/ingress"
+	e2eingress "k8s.io/kubernetes/test/e2e/framework/ingress"
 	"k8s.io/kubernetes/test/e2e/framework/providers/gce"
 	"k8s.io/kubernetes/test/e2e/network/scale"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var (
@@ -129,13 +131,18 @@ func main() {
 		}
 	}()
 
+	// This program is meant for local testing. It creates a Namespace
+	// directly instead of using the e2e test framework.
 	ns := &v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: testNamespace,
+			Labels: map[string]string{
+				admissionapi.EnforceLevelLabel: string(admissionapi.LevelPrivileged),
+			},
 		},
 	}
 	klog.Infof("Creating namespace %s...", ns.Name)
-	if _, err := cs.CoreV1().Namespaces().Create(ns); err != nil {
+	if _, err := cs.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{}); err != nil {
 		klog.Errorf("Failed to create namespace %s: %v", ns.Name, err)
 		testSuccessFlag = false
 		return
@@ -143,7 +150,7 @@ func main() {
 	if cleanup {
 		defer func() {
 			klog.Infof("Deleting namespace %s...", ns.Name)
-			if err := cs.CoreV1().Namespaces().Delete(ns.Name, nil); err != nil {
+			if err := cs.CoreV1().Namespaces().Delete(context.TODO(), ns.Name, metav1.DeleteOptions{}); err != nil {
 				klog.Errorf("Failed to delete namespace %s: %v", ns.Name, err)
 				testSuccessFlag = false
 			}
@@ -152,7 +159,7 @@ func main() {
 
 	// Setting up a localized scale test framework.
 	f := scale.NewIngressScaleFramework(cs, ns.Name, cloudConfig)
-	f.Logger = &ingress.GLogger{}
+	f.Logger = &e2eingress.GLogger{}
 	// Customizing scale test.
 	f.EnableTLS = enableTLS
 	f.OutputFile = outputFile
@@ -160,23 +167,26 @@ func main() {
 		f.NumIngressesTest = numIngressesTest
 	}
 
+	// This could be used to set a deadline.
+	ctx := context.Background()
+
 	// Real test begins.
 	if cleanup {
 		defer func() {
-			if errs := f.CleanupScaleTest(); len(errs) != 0 {
+			if errs := f.CleanupScaleTest(ctx); len(errs) != 0 {
 				klog.Errorf("Failed to cleanup scale test: %v", errs)
 				testSuccessFlag = false
 			}
 		}()
 	}
-	err = f.PrepareScaleTest()
+	err = f.PrepareScaleTest(ctx)
 	if err != nil {
 		klog.Errorf("Failed to prepare scale test: %v", err)
 		testSuccessFlag = false
 		return
 	}
 
-	if errs := f.RunScaleTest(); len(errs) != 0 {
+	if errs := f.RunScaleTest(ctx); len(errs) != 0 {
 		klog.Errorf("Failed while running scale test: %v", errs)
 		testSuccessFlag = false
 	}

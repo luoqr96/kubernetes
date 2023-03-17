@@ -1,3 +1,6 @@
+//go:build !providerless
+// +build !providerless
+
 /*
 Copyright 2016 The Kubernetes Authors.
 
@@ -18,20 +21,15 @@ package azure
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/services/containerregistry/mgmt/2019-05-01/containerregistry"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/go-autorest/autorest/azure"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/pointer"
+
+	"github.com/stretchr/testify/assert"
 )
-
-type fakeClient struct {
-	results []containerregistry.Registry
-}
-
-func (f *fakeClient) List(ctx context.Context) ([]containerregistry.Registry, error) {
-	return f.results, nil
-}
 
 func Test(t *testing.T) {
 	configStr := `
@@ -41,40 +39,37 @@ func Test(t *testing.T) {
     }`
 	result := []containerregistry.Registry{
 		{
-			Name: to.StringPtr("foo"),
+			Name: pointer.String("foo"),
 			RegistryProperties: &containerregistry.RegistryProperties{
-				LoginServer: to.StringPtr("*.azurecr.io"),
+				LoginServer: pointer.String("*.azurecr.io"),
 			},
 		},
 		{
-			Name: to.StringPtr("bar"),
+			Name: pointer.String("bar"),
 			RegistryProperties: &containerregistry.RegistryProperties{
-				LoginServer: to.StringPtr("*.azurecr.cn"),
+				LoginServer: pointer.String("*.azurecr.cn"),
 			},
 		},
 		{
-			Name: to.StringPtr("baz"),
+			Name: pointer.String("baz"),
 			RegistryProperties: &containerregistry.RegistryProperties{
-				LoginServer: to.StringPtr("*.azurecr.de"),
+				LoginServer: pointer.String("*.azurecr.de"),
 			},
 		},
 		{
-			Name: to.StringPtr("bus"),
+			Name: pointer.String("bus"),
 			RegistryProperties: &containerregistry.RegistryProperties{
-				LoginServer: to.StringPtr("*.azurecr.us"),
+				LoginServer: pointer.String("*.azurecr.us"),
 			},
 		},
-	}
-	fakeClient := &fakeClient{
-		results: result,
 	}
 
 	provider := &acrProvider{
-		registryClient: fakeClient,
+		cache: cache.NewExpirationStore(stringKeyFunc, &acrExpirationPolicy{}),
 	}
 	provider.loadConfig(bytes.NewBufferString(configStr))
 
-	creds := provider.Provide("")
+	creds := provider.Provide("foo.azurecr.io/nginx:v1")
 
 	if len(creds) != len(result)+1 {
 		t.Errorf("Unexpected list: %v, expected length %d", creds, len(result)+1)
@@ -95,7 +90,57 @@ func Test(t *testing.T) {
 	}
 }
 
+func TestProvide(t *testing.T) {
+	testCases := []struct {
+		desc                string
+		image               string
+		configStr           string
+		expectedCredsLength int
+	}{
+		{
+			desc:  "return multiple credentials using Service Principal",
+			image: "foo.azurecr.io/bar/image:v1",
+			configStr: `
+    {
+        "aadClientId": "foo",
+        "aadClientSecret": "bar"
+    }`,
+			expectedCredsLength: 5,
+		},
+		{
+			desc:  "retuen 0 credential for non-ACR image using Managed Identity",
+			image: "busybox",
+			configStr: `
+    {
+	"UseManagedIdentityExtension": true
+    }`,
+			expectedCredsLength: 0,
+		},
+	}
+
+	for i, test := range testCases {
+		provider := &acrProvider{
+			cache: cache.NewExpirationStore(stringKeyFunc, &acrExpirationPolicy{}),
+		}
+		provider.loadConfig(bytes.NewBufferString(test.configStr))
+
+		creds := provider.Provide(test.image)
+		assert.Equal(t, test.expectedCredsLength, len(creds), "TestCase[%d]: %s", i, test.desc)
+	}
+}
+
 func TestParseACRLoginServerFromImage(t *testing.T) {
+	configStr := `
+    {
+        "aadClientId": "foo",
+        "aadClientSecret": "bar"
+    }`
+
+	provider := &acrProvider{}
+	provider.loadConfig(bytes.NewBufferString(configStr))
+	provider.environment = &azure.Environment{
+		ContainerRegistryDNSSuffix: ".azurecr.my.cloud",
+	}
 	tests := []struct {
 		image    string
 		expected string
@@ -124,9 +169,13 @@ func TestParseACRLoginServerFromImage(t *testing.T) {
 			image:    "foo.azurecr.us/bar/image:version",
 			expected: "foo.azurecr.us",
 		},
+		{
+			image:    "foo.azurecr.my.cloud/bar/image:version",
+			expected: "foo.azurecr.my.cloud",
+		},
 	}
 	for _, test := range tests {
-		if loginServer := parseACRLoginServerFromImage(test.image); loginServer != test.expected {
+		if loginServer := provider.parseACRLoginServerFromImage(test.image); loginServer != test.expected {
 			t.Errorf("function parseACRLoginServerFromImage returns \"%s\" for image %s, expected \"%s\"", loginServer, test.image, test.expected)
 		}
 	}

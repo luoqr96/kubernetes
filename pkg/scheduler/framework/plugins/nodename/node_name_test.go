@@ -22,9 +22,8 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
+	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
 func TestNodeName(t *testing.T) {
@@ -40,29 +39,13 @@ func TestNodeName(t *testing.T) {
 			name: "no host specified",
 		},
 		{
-			pod: &v1.Pod{
-				Spec: v1.PodSpec{
-					NodeName: "foo",
-				},
-			},
-			node: &v1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "foo",
-				},
-			},
+			pod:  st.MakePod().Node("foo").Obj(),
+			node: st.MakeNode().Name("foo").Obj(),
 			name: "host matches",
 		},
 		{
-			pod: &v1.Pod{
-				Spec: v1.PodSpec{
-					NodeName: "bar",
-				},
-			},
-			node: &v1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "foo",
-				},
-			},
+			pod:        st.MakePod().Node("bar").Obj(),
+			node:       st.MakeNode().Name("foo").Obj(),
 			name:       "host doesn't match",
 			wantStatus: framework.NewStatus(framework.UnschedulableAndUnresolvable, ErrReason),
 		},
@@ -70,7 +53,7 @@ func TestNodeName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			nodeInfo := schedulernodeinfo.NewNodeInfo()
+			nodeInfo := framework.NewNodeInfo()
 			nodeInfo.SetNode(test.node)
 
 			p, _ := New(nil, nil)

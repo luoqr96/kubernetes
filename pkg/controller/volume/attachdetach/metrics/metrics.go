@@ -24,7 +24,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/cache"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/util"
 	"k8s.io/kubernetes/pkg/volume"
@@ -92,10 +92,11 @@ type attachDetachStateCollector struct {
 }
 
 // volumeCount is a map of maps used as a counter, e.g.:
-//     node 172.168.1.100.ec2.internal has 10 EBS and 3 glusterfs PVC in use:
-//     {"172.168.1.100.ec2.internal": {"aws-ebs": 10, "glusterfs": 3}}
-//     state actual_state_of_world contains a total of 10 EBS volumes:
-//     {"actual_state_of_world": {"aws-ebs": 10}}
+//
+//	node 172.168.1.100.ec2.internal has 10 EBS and 3 glusterfs PVC in use:
+//	{"172.168.1.100.ec2.internal": {"aws-ebs": 10, "glusterfs": 3}}
+//	state actual_state_of_world contains a total of 10 EBS volumes:
+//	{"actual_state_of_world": {"aws-ebs": 10}}
 type volumeCount map[string]map[string]int64
 
 func (v volumeCount) add(typeKey, counterKey string) {
@@ -168,7 +169,7 @@ func (collector *attachDetachStateCollector) getVolumeInUseCount() volumeCount {
 			continue
 		}
 		for _, podVolume := range pod.Spec.Volumes {
-			volumeSpec, err := util.CreateVolumeSpec(podVolume, pod.Namespace, types.NodeName(pod.Spec.NodeName), collector.volumePluginMgr, collector.pvcLister, collector.pvLister, collector.csiMigratedPluginManager, collector.intreeToCSITranslator)
+			volumeSpec, err := util.CreateVolumeSpec(podVolume, pod, types.NodeName(pod.Spec.NodeName), collector.volumePluginMgr, collector.pvcLister, collector.pvLister, collector.csiMigratedPluginManager, collector.intreeToCSITranslator)
 			if err != nil {
 				continue
 			}

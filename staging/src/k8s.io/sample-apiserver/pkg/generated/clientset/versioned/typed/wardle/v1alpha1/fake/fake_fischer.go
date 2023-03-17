@@ -19,13 +19,17 @@ limitations under the License.
 package fake
 
 import (
+	"context"
+	json "encoding/json"
+	"fmt"
+
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
 	v1alpha1 "k8s.io/sample-apiserver/pkg/apis/wardle/v1alpha1"
+	wardlev1alpha1 "k8s.io/sample-apiserver/pkg/generated/applyconfiguration/wardle/v1alpha1"
 )
 
 // FakeFischers implements FischerInterface
@@ -33,12 +37,12 @@ type FakeFischers struct {
 	Fake *FakeWardleV1alpha1
 }
 
-var fischersResource = schema.GroupVersionResource{Group: "wardle.example.com", Version: "v1alpha1", Resource: "fischers"}
+var fischersResource = v1alpha1.SchemeGroupVersion.WithResource("fischers")
 
-var fischersKind = schema.GroupVersionKind{Group: "wardle.example.com", Version: "v1alpha1", Kind: "Fischer"}
+var fischersKind = v1alpha1.SchemeGroupVersion.WithKind("Fischer")
 
 // Get takes name of the fischer, and returns the corresponding fischer object, and an error if there is any.
-func (c *FakeFischers) Get(name string, options v1.GetOptions) (result *v1alpha1.Fischer, err error) {
+func (c *FakeFischers) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.Fischer, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewRootGetAction(fischersResource, name), &v1alpha1.Fischer{})
 	if obj == nil {
@@ -48,7 +52,7 @@ func (c *FakeFischers) Get(name string, options v1.GetOptions) (result *v1alpha1
 }
 
 // List takes label and field selectors, and returns the list of Fischers that match those selectors.
-func (c *FakeFischers) List(opts v1.ListOptions) (result *v1alpha1.FischerList, err error) {
+func (c *FakeFischers) List(ctx context.Context, opts v1.ListOptions) (result *v1alpha1.FischerList, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewRootListAction(fischersResource, fischersKind, opts), &v1alpha1.FischerList{})
 	if obj == nil {
@@ -69,13 +73,13 @@ func (c *FakeFischers) List(opts v1.ListOptions) (result *v1alpha1.FischerList, 
 }
 
 // Watch returns a watch.Interface that watches the requested fischers.
-func (c *FakeFischers) Watch(opts v1.ListOptions) (watch.Interface, error) {
+func (c *FakeFischers) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 	return c.Fake.
 		InvokesWatch(testing.NewRootWatchAction(fischersResource, opts))
 }
 
 // Create takes the representation of a fischer and creates it.  Returns the server's representation of the fischer, and an error, if there is any.
-func (c *FakeFischers) Create(fischer *v1alpha1.Fischer) (result *v1alpha1.Fischer, err error) {
+func (c *FakeFischers) Create(ctx context.Context, fischer *v1alpha1.Fischer, opts v1.CreateOptions) (result *v1alpha1.Fischer, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewRootCreateAction(fischersResource, fischer), &v1alpha1.Fischer{})
 	if obj == nil {
@@ -85,7 +89,7 @@ func (c *FakeFischers) Create(fischer *v1alpha1.Fischer) (result *v1alpha1.Fisch
 }
 
 // Update takes the representation of a fischer and updates it. Returns the server's representation of the fischer, and an error, if there is any.
-func (c *FakeFischers) Update(fischer *v1alpha1.Fischer) (result *v1alpha1.Fischer, err error) {
+func (c *FakeFischers) Update(ctx context.Context, fischer *v1alpha1.Fischer, opts v1.UpdateOptions) (result *v1alpha1.Fischer, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewRootUpdateAction(fischersResource, fischer), &v1alpha1.Fischer{})
 	if obj == nil {
@@ -95,24 +99,45 @@ func (c *FakeFischers) Update(fischer *v1alpha1.Fischer) (result *v1alpha1.Fisch
 }
 
 // Delete takes name of the fischer and deletes it. Returns an error if one occurs.
-func (c *FakeFischers) Delete(name string, options *v1.DeleteOptions) error {
+func (c *FakeFischers) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewRootDeleteAction(fischersResource, name), &v1alpha1.Fischer{})
+		Invokes(testing.NewRootDeleteActionWithOptions(fischersResource, name, opts), &v1alpha1.Fischer{})
 	return err
 }
 
 // DeleteCollection deletes a collection of objects.
-func (c *FakeFischers) DeleteCollection(options *v1.DeleteOptions, listOptions v1.ListOptions) error {
-	action := testing.NewRootDeleteCollectionAction(fischersResource, listOptions)
+func (c *FakeFischers) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
+	action := testing.NewRootDeleteCollectionAction(fischersResource, listOpts)
 
 	_, err := c.Fake.Invokes(action, &v1alpha1.FischerList{})
 	return err
 }
 
 // Patch applies the patch and returns the patched fischer.
-func (c *FakeFischers) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1alpha1.Fischer, err error) {
+func (c *FakeFischers) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.Fischer, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewRootPatchSubresourceAction(fischersResource, name, pt, data, subresources...), &v1alpha1.Fischer{})
+	if obj == nil {
+		return nil, err
+	}
+	return obj.(*v1alpha1.Fischer), err
+}
+
+// Apply takes the given apply declarative configuration, applies it and returns the applied fischer.
+func (c *FakeFischers) Apply(ctx context.Context, fischer *wardlev1alpha1.FischerApplyConfiguration, opts v1.ApplyOptions) (result *v1alpha1.Fischer, err error) {
+	if fischer == nil {
+		return nil, fmt.Errorf("fischer provided to Apply must not be nil")
+	}
+	data, err := json.Marshal(fischer)
+	if err != nil {
+		return nil, err
+	}
+	name := fischer.Name
+	if name == nil {
+		return nil, fmt.Errorf("fischer.Name must be provided to Apply")
+	}
+	obj, err := c.Fake.
+		Invokes(testing.NewRootPatchSubresourceAction(fischersResource, *name, types.ApplyPatchType, data), &v1alpha1.Fischer{})
 	if obj == nil {
 		return nil, err
 	}

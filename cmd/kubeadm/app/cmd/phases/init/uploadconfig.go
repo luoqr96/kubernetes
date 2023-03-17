@@ -20,9 +20,11 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
@@ -47,8 +49,8 @@ var (
 		`)
 
 	uploadKubeletConfigLongDesc = cmdutil.LongDesc(`
-		Upload kubelet configuration extracted from the kubeadm InitConfiguration object to a ConfigMap
-		of the form kubelet-config-1.X in the cluster, where X is the minor version of the current (API Server) Kubernetes version.
+		Upload the kubelet configuration extracted from the kubeadm InitConfiguration object
+		to a kubelet-config ConfigMap in the cluster
 		`)
 
 	uploadKubeletConfigExample = cmdutil.Examples(`
@@ -94,13 +96,15 @@ func NewUploadConfigPhase() workflow.Phase {
 func getUploadConfigPhaseFlags() []string {
 	return []string{
 		options.CfgPath,
+		options.NodeCRISocket,
 		options.KubeconfigPath,
+		options.DryRun,
 	}
 }
 
 // runUploadKubeadmConfig uploads the kubeadm configuration to a ConfigMap
 func runUploadKubeadmConfig(c workflow.RunData) error {
-	cfg, client, err := getUploadConfigData(c)
+	cfg, client, _, err := getUploadConfigData(c)
 	if err != nil {
 		return err
 	}
@@ -114,13 +118,13 @@ func runUploadKubeadmConfig(c workflow.RunData) error {
 
 // runUploadKubeletConfig uploads the kubelet configuration to a ConfigMap
 func runUploadKubeletConfig(c workflow.RunData) error {
-	cfg, client, err := getUploadConfigData(c)
+	cfg, client, patchesDir, err := getUploadConfigData(c)
 	if err != nil {
 		return err
 	}
 
 	klog.V(1).Infoln("[upload-config] Uploading the kubelet component config to a ConfigMap")
-	if err = kubeletphase.CreateConfigMap(&cfg.ClusterConfiguration, client); err != nil {
+	if err = kubeletphase.CreateConfigMap(&cfg.ClusterConfiguration, patchesDir, client); err != nil {
 		return errors.Wrap(err, "error creating kubelet configuration ConfigMap")
 	}
 
@@ -131,15 +135,15 @@ func runUploadKubeletConfig(c workflow.RunData) error {
 	return nil
 }
 
-func getUploadConfigData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.Interface, error) {
+func getUploadConfigData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.Interface, string, error) {
 	data, ok := c.(InitData)
 	if !ok {
-		return nil, nil, errors.New("upload-config phase invoked with an invalid data struct")
+		return nil, nil, "", errors.New("upload-config phase invoked with an invalid data struct")
 	}
 	cfg := data.Cfg()
 	client, err := data.Client()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	return cfg, client, err
+	return cfg, client, data.PatchesDir(), err
 }

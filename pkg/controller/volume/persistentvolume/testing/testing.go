@@ -30,11 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/watch"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/klog/v2"
 )
 
 // ErrVersionConflict is the error returned when resource version of requested
@@ -43,21 +41,21 @@ var ErrVersionConflict = errors.New("VersionError")
 
 // VolumeReactor is a core.Reactor that simulates etcd and API server. It
 // stores:
-// - Latest version of claims volumes saved by the controller.
-// - Queue of all saves (to simulate "volume/claim updated" events). This queue
-//   contains all intermediate state of an object - e.g. a claim.VolumeName
-//   is updated first and claim.Phase second. This queue will then contain both
-//   updates as separate entries.
-// - Number of changes since the last call to VolumeReactor.syncAll().
-// - Optionally, volume and claim fake watchers which should be the same ones
-//   used by the controller. Any time an event function like deleteVolumeEvent
-//   is called to simulate an event, the reactor's stores are updated and the
-//   controller is sent the event via the fake watcher.
-// - Optionally, list of error that should be returned by reactor, simulating
-//   etcd / API server failures. These errors are evaluated in order and every
-//   error is returned only once. I.e. when the reactor finds matching
-//   ReactorError, it return appropriate error and removes the ReactorError from
-//   the list.
+//   - Latest version of claims volumes saved by the controller.
+//   - Queue of all saves (to simulate "volume/claim updated" events). This queue
+//     contains all intermediate state of an object - e.g. a claim.VolumeName
+//     is updated first and claim.Phase second. This queue will then contain both
+//     updates as separate entries.
+//   - Number of changes since the last call to VolumeReactor.syncAll().
+//   - Optionally, volume and claim fake watchers which should be the same ones
+//     used by the controller. Any time an event function like deleteVolumeEvent
+//     is called to simulate an event, the reactor's stores are updated and the
+//     controller is sent the event via the fake watcher.
+//   - Optionally, list of error that should be returned by reactor, simulating
+//     etcd / API server failures. These errors are evaluated in order and every
+//     error is returned only once. I.e. when the reactor finds matching
+//     ReactorError, it return appropriate error and removes the ReactorError from
+//     the list.
 type VolumeReactor struct {
 	volumes              map[string]*v1.PersistentVolume
 	claims               map[string]*v1.PersistentVolumeClaim
@@ -110,11 +108,11 @@ func (r *VolumeReactor) React(action core.Action) (handled bool, ret runtime.Obj
 		// check the volume does not exist
 		_, found := r.volumes[volume.Name]
 		if found {
-			return true, nil, fmt.Errorf("Cannot create volume %s: volume already exists", volume.Name)
+			return true, nil, fmt.Errorf("cannot create volume %s: volume already exists", volume.Name)
 		}
 
 		// mimic apiserver defaulting
-		if volume.Spec.VolumeMode == nil && utilfeature.DefaultFeatureGate.Enabled(features.BlockVolume) {
+		if volume.Spec.VolumeMode == nil {
 			volume.Spec.VolumeMode = new(v1.PersistentVolumeMode)
 			*volume.Spec.VolumeMode = v1.PersistentVolumeFilesystem
 		}
@@ -136,7 +134,7 @@ func (r *VolumeReactor) React(action core.Action) (handled bool, ret runtime.Obj
 		// check the claim does not exist
 		_, found := r.claims[claim.Name]
 		if found {
-			return true, nil, fmt.Errorf("Cannot create claim %s: claim already exists", claim.Name)
+			return true, nil, fmt.Errorf("cannot create claim %s: claim already exists", claim.Name)
 		}
 
 		// Store the updated object to appropriate places.
@@ -169,7 +167,7 @@ func (r *VolumeReactor) React(action core.Action) (handled bool, ret runtime.Obj
 			volume = volume.DeepCopy()
 			volume.ResourceVersion = strconv.Itoa(storedVer + 1)
 		} else {
-			return true, nil, fmt.Errorf("Cannot update volume %s: volume not found", volume.Name)
+			return true, nil, fmt.Errorf("cannot update volume %s: volume not found", volume.Name)
 		}
 
 		// Store the updated object to appropriate places.
@@ -202,7 +200,7 @@ func (r *VolumeReactor) React(action core.Action) (handled bool, ret runtime.Obj
 			claim = claim.DeepCopy()
 			claim.ResourceVersion = strconv.Itoa(storedVer + 1)
 		} else {
-			return true, nil, fmt.Errorf("Cannot update claim %s: claim not found", claim.Name)
+			return true, nil, fmt.Errorf("cannot update claim %s: claim not found", claim.Name)
 		}
 
 		// Store the updated object to appropriate places.
@@ -247,7 +245,7 @@ func (r *VolumeReactor) React(action core.Action) (handled bool, ret runtime.Obj
 			r.changedSinceLastSync++
 			return true, nil, nil
 		}
-		return true, nil, fmt.Errorf("Cannot delete volume %s: not found", name)
+		return true, nil, fmt.Errorf("cannot delete volume %s: not found", name)
 
 	case action.Matches("delete", "persistentvolumeclaims"):
 		name := action.(core.DeleteAction).GetName()
@@ -261,7 +259,7 @@ func (r *VolumeReactor) React(action core.Action) (handled bool, ret runtime.Obj
 			r.changedSinceLastSync++
 			return true, nil, nil
 		}
-		return true, nil, fmt.Errorf("Cannot delete claim %s: not found", name)
+		return true, nil, fmt.Errorf("cannot delete claim %s: not found", name)
 	}
 
 	return false, nil, nil

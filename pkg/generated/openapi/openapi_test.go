@@ -21,15 +21,18 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/go-openapi/spec"
-
 	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/kube-openapi/pkg/common"
+	"k8s.io/kube-openapi/pkg/handler"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 func TestOpenAPIRoundtrip(t *testing.T) {
 	dummyRef := func(name string) spec.Ref { return spec.MustCreateRef("#/definitions/dummy") }
 	for name, value := range GetOpenAPIDefinitions(dummyRef) {
 		t.Run(name, func(t *testing.T) {
+			// TODO(kubernetes/gengo#193): We currently round-trip ints to floats.
+			value.Schema = *handler.PruneDefaultsSchema(&value.Schema)
 			data, err := json.Marshal(value.Schema)
 			if err != nil {
 				t.Error(err)
@@ -41,6 +44,12 @@ func TestOpenAPIRoundtrip(t *testing.T) {
 				t.Error(err)
 				return
 			}
+
+			// Remove the embedded v2 schema if it presents.
+			// The v2 schema either become the schema (when serving v2) or get pruned (v3)
+			// and it is never round-tripped.
+			delete(roundTripped.Extensions, common.ExtensionV2Schema)
+			delete(value.Schema.Extensions, common.ExtensionV2Schema)
 
 			if !reflect.DeepEqual(value.Schema, roundTripped) {
 				t.Errorf("unexpected diff (a=expected,b=roundtripped):\n%s", diff.ObjectReflectDiff(value.Schema, roundTripped))

@@ -17,6 +17,7 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -26,7 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	awscloud "k8s.io/legacy-cloud-providers/aws"
@@ -38,7 +39,7 @@ func init() {
 
 func newProvider() (framework.ProviderInterface, error) {
 	if framework.TestContext.CloudConfig.Zone == "" {
-		return nil, fmt.Errorf("gce-zone must be specified for AWS")
+		framework.Logf("Warning: gce-zone not specified! Some tests that use the AWS SDK may select the wrong region and fail.")
 	}
 	return &Provider{}, nil
 }
@@ -67,7 +68,7 @@ func (p *Provider) GroupSize(group string) (int, error) {
 	client := autoscaling.New(awsSession)
 	instanceGroup, err := awscloud.DescribeInstanceGroup(client, group)
 	if err != nil {
-		return -1, fmt.Errorf("error describing instance group: %v", err)
+		return -1, fmt.Errorf("error describing instance group: %w", err)
 	}
 	if instanceGroup == nil {
 		return -1, fmt.Errorf("instance group not found: %s", group)
@@ -91,6 +92,14 @@ func (p *Provider) DeleteNode(node *v1.Node) error {
 	}
 	_, err = client.TerminateInstances(req)
 	return err
+}
+
+func (p *Provider) CreateShare() (string, string, string, error) {
+	return "", "", "", nil
+}
+
+func (p *Provider) DeleteShare(accountName, shareName string) error {
+	return nil
 }
 
 // CreatePD creates a persistent volume on the specified availability zone
@@ -148,14 +157,14 @@ func (p *Provider) DeletePD(pdName string) error {
 		if awsError, ok := err.(awserr.Error); ok && awsError.Code() == "InvalidVolume.NotFound" {
 			framework.Logf("volume deletion implicitly succeeded because volume %q does not exist.", pdName)
 		} else {
-			return fmt.Errorf("error deleting EBS volumes: %v", err)
+			return fmt.Errorf("error deleting EBS volumes: %w", err)
 		}
 	}
 	return nil
 }
 
 // CreatePVSource creates a persistent volume source
-func (p *Provider) CreatePVSource(zone, diskName string) (*v1.PersistentVolumeSource, error) {
+func (p *Provider) CreatePVSource(ctx context.Context, zone, diskName string) (*v1.PersistentVolumeSource, error) {
 	return &v1.PersistentVolumeSource{
 		AWSElasticBlockStore: &v1.AWSElasticBlockStoreVolumeSource{
 			VolumeID: diskName,
@@ -165,8 +174,8 @@ func (p *Provider) CreatePVSource(zone, diskName string) (*v1.PersistentVolumeSo
 }
 
 // DeletePVSource deletes a persistent volume source
-func (p *Provider) DeletePVSource(pvSource *v1.PersistentVolumeSource) error {
-	return e2epv.DeletePDWithRetry(pvSource.AWSElasticBlockStore.VolumeID)
+func (p *Provider) DeletePVSource(ctx context.Context, pvSource *v1.PersistentVolumeSource) error {
+	return e2epv.DeletePDWithRetry(ctx, pvSource.AWSElasticBlockStore.VolumeID)
 }
 
 func newAWSClient(zone string) *ec2.EC2 {

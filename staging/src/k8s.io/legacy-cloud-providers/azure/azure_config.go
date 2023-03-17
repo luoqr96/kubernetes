@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -19,10 +20,11 @@ limitations under the License.
 package azure
 
 import (
+	"context"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
 )
 
@@ -68,7 +70,7 @@ func (az *Cloud) getConfigFromSecret() (*Config, error) {
 		return nil, nil
 	}
 
-	secret, err := az.kubeClient.CoreV1().Secrets(cloudConfigNamespace).Get(cloudConfigSecretName, metav1.GetOptions{})
+	secret, err := az.KubeClient.CoreV1().Secrets(cloudConfigNamespace).Get(context.TODO(), cloudConfigSecretName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get secret %s: %v", cloudConfigSecretName, err)
 	}

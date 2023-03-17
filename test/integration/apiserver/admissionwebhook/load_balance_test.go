@@ -17,11 +17,12 @@ limitations under the License.
 package admissionwebhook
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -30,9 +31,8 @@ import (
 	"time"
 
 	"k8s.io/api/admission/v1beta1"
-	admissionv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -101,40 +101,41 @@ func TestWebhookLoadBalance(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = client.CoreV1().Pods("default").Create(loadBalanceMarkerFixture)
+	_, err = client.CoreV1().Pods("default").Create(context.TODO(), loadBalanceMarkerFixture, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	upCh := recorder.Reset()
 	ns := "load-balance"
-	_, err = client.CoreV1().Namespaces().Create(&v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
+	_, err = client.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	fail := admissionv1beta1.Fail
-	mutatingCfg, err := client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Create(&admissionv1beta1.MutatingWebhookConfiguration{
+	fail := admissionregistrationv1.Fail
+	mutatingCfg, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(context.TODO(), &admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "admission.integration.test"},
-		Webhooks: []admissionv1beta1.MutatingWebhook{{
+		Webhooks: []admissionregistrationv1.MutatingWebhook{{
 			Name: "admission.integration.test",
-			ClientConfig: admissionv1beta1.WebhookClientConfig{
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{
 				URL:      &webhookURL,
 				CABundle: localhostCert,
 			},
-			Rules: []admissionv1beta1.RuleWithOperations{{
-				Operations: []admissionv1beta1.OperationType{admissionv1beta1.OperationAll},
-				Rule:       admissionv1beta1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}},
+			Rules: []admissionregistrationv1.RuleWithOperations{{
+				Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.OperationAll},
+				Rule:       admissionregistrationv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}},
 			}},
 			FailurePolicy:           &fail,
 			AdmissionReviewVersions: []string{"v1beta1"},
+			SideEffects:             &noSideEffects,
 		}},
-	})
+	}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		err := client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Delete(mutatingCfg.GetName(), &metav1.DeleteOptions{})
+		err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(context.TODO(), mutatingCfg.GetName(), metav1.DeleteOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,7 +143,7 @@ func TestWebhookLoadBalance(t *testing.T) {
 
 	// wait until new webhook is called the first time
 	if err := wait.PollImmediate(time.Millisecond*5, wait.ForeverTestTimeout, func() (bool, error) {
-		_, err = client.CoreV1().Pods("default").Patch(loadBalanceMarkerFixture.Name, types.JSONPatchType, []byte("[]"))
+		_, err = client.CoreV1().Pods("default").Patch(context.TODO(), loadBalanceMarkerFixture.Name, types.JSONPatchType, []byte("[]"), metav1.PatchOptions{})
 		select {
 		case <-upCh:
 			return true, nil
@@ -161,7 +162,7 @@ func TestWebhookLoadBalance(t *testing.T) {
 				GenerateName: "loadbalance-",
 			},
 			Spec: corev1.PodSpec{
-				Containers: []v1.Container{{
+				Containers: []corev1.Container{{
 					Name:  "fake-name",
 					Image: "fakeimage",
 				}},
@@ -175,7 +176,7 @@ func TestWebhookLoadBalance(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := client.CoreV1().Pods(ns).Create(pod())
+			_, err := client.CoreV1().Pods(ns).Create(context.TODO(), pod(), metav1.CreateOptions{})
 			if err != nil {
 				t.Error(err)
 			}
@@ -194,7 +195,7 @@ func TestWebhookLoadBalance(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := client.CoreV1().Pods(ns).Create(pod())
+			_, err := client.CoreV1().Pods(ns).Create(context.TODO(), pod(), metav1.CreateOptions{})
 			if err != nil {
 				t.Error(err)
 			}
@@ -243,7 +244,7 @@ func newLoadBalanceWebhookHandler(recorder *connectionRecorder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(r.Proto)
 		defer r.Body.Close()
-		data, err := ioutil.ReadAll(r.Body)
+		data, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 		}
@@ -285,7 +286,7 @@ var loadBalanceMarkerFixture = &corev1.Pod{
 		Name:      "marker",
 	},
 	Spec: corev1.PodSpec{
-		Containers: []v1.Container{{
+		Containers: []corev1.Container{{
 			Name:  "fake-name",
 			Image: "fakeimage",
 		}},

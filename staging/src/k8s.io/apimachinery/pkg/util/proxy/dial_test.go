@@ -26,7 +26,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"strings"
+	"regexp"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/diff"
@@ -49,13 +49,14 @@ func TestDialURL(t *testing.T) {
 		TLSConfig   *tls.Config
 		Dial        utilnet.DialFunc
 		ExpectError string
+		ExpectProto string
 	}{
 		"insecure": {
 			TLSConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 		"secure, no roots": {
 			TLSConfig:   &tls.Config{InsecureSkipVerify: false},
-			ExpectError: "unknown authority",
+			ExpectError: "unknown authority|not trusted",
 		},
 		"secure with roots": {
 			TLSConfig: &tls.Config{InsecureSkipVerify: false, RootCAs: roots},
@@ -75,7 +76,7 @@ func TestDialURL(t *testing.T) {
 		"secure, no roots, custom dial": {
 			TLSConfig:   &tls.Config{InsecureSkipVerify: false},
 			Dial:        d.DialContext,
-			ExpectError: "unknown authority",
+			ExpectError: "unknown authority|not trusted",
 		},
 		"secure with roots, custom dial": {
 			TLSConfig: &tls.Config{InsecureSkipVerify: false, RootCAs: roots},
@@ -90,13 +91,28 @@ func TestDialURL(t *testing.T) {
 			TLSConfig: &tls.Config{InsecureSkipVerify: false, RootCAs: roots, ServerName: "example.com"},
 			Dial:      d.DialContext,
 		},
+		"ensure we use http2 if specified": {
+			TLSConfig:   &tls.Config{InsecureSkipVerify: false, RootCAs: roots, ServerName: "example.com", NextProtos: []string{"http2"}},
+			Dial:        d.DialContext,
+			ExpectProto: "http2",
+		},
+		"ensure we use http/1.1 if unspecified": {
+			TLSConfig:   &tls.Config{InsecureSkipVerify: false, RootCAs: roots, ServerName: "example.com"},
+			Dial:        d.DialContext,
+			ExpectProto: "http/1.1",
+		},
+		"ensure we use http/1.1 if available": {
+			TLSConfig:   &tls.Config{InsecureSkipVerify: false, RootCAs: roots, ServerName: "example.com", NextProtos: []string{"http2", "http/1.1"}},
+			Dial:        d.DialContext,
+			ExpectProto: "http/1.1",
+		},
 	}
 
 	for k, tc := range testcases {
 		func() {
 			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {}))
 			defer ts.Close()
-			ts.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+			ts.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"http2", "http/1.1"}}
 			ts.StartTLS()
 
 			// Make a copy of the config
@@ -127,7 +143,7 @@ func TestDialURL(t *testing.T) {
 			u, _ := url.Parse(ts.URL)
 			_, p, _ := net.SplitHostPort(u.Host)
 			u.Host = net.JoinHostPort("127.0.0.1", p)
-			conn, err := DialURL(context.Background(), u, transport)
+			conn, err := dialURL(context.Background(), u, transport)
 
 			// Make sure dialing doesn't mutate the transport's TLSConfig
 			if !reflect.DeepEqual(tc.TLSConfig, tlsConfigCopy) {
@@ -138,11 +154,19 @@ func TestDialURL(t *testing.T) {
 				if tc.ExpectError == "" {
 					t.Errorf("%s: expected no error, got %q", k, err.Error())
 				}
-				if !strings.Contains(err.Error(), tc.ExpectError) {
+				if tc.ExpectError != "" && !regexp.MustCompile(tc.ExpectError).MatchString(err.Error()) {
 					t.Errorf("%s: expected error containing %q, got %q", k, tc.ExpectError, err.Error())
 				}
 				return
 			}
+
+			tlsConn := conn.(*tls.Conn)
+			if tc.ExpectProto != "" {
+				if tlsConn.ConnectionState().NegotiatedProtocol != tc.ExpectProto {
+					t.Errorf("%s: expected proto %s, got %s", k, tc.ExpectProto, tlsConn.ConnectionState().NegotiatedProtocol)
+				}
+			}
+
 			conn.Close()
 			if tc.ExpectError != "" {
 				t.Errorf("%s: expected error %q, got none", k, tc.ExpectError)
@@ -153,7 +177,8 @@ func TestDialURL(t *testing.T) {
 }
 
 // localhostCert was generated from crypto/tls/generate_cert.go with the following command:
-//     go run generate_cert.go  --rsa-bits 2048 --host 127.0.0.1,::1,example.com --ca --start-date "Jan 1 00:00:00 1970" --duration=1000000h
+//
+//	go run generate_cert.go  --rsa-bits 2048 --host 127.0.0.1,::1,example.com --ca --start-date "Jan 1 00:00:00 1970" --duration=1000000h
 var localhostCert = []byte(`-----BEGIN CERTIFICATE-----
 MIIDGTCCAgGgAwIBAgIRAKfNl1LEAt7nFPYvHBnpv2swDQYJKoZIhvcNAQELBQAw
 EjEQMA4GA1UEChMHQWNtZSBDbzAgFw03MDAxMDEwMDAwMDBaGA8yMDg0MDEyOTE2

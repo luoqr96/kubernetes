@@ -21,31 +21,14 @@ import (
 	"testing"
 )
 
-func TestCPUSetBuilder(t *testing.T) {
-	b := NewBuilder()
-	elems := []int{1, 2, 3, 4, 5}
-	for _, elem := range elems {
-		b.Add(elem)
-	}
-	result := b.Result()
-	for _, elem := range elems {
-		if !result.Contains(elem) {
-			t.Fatalf("expected cpuset to contain element %d: [%v]", elem, result)
-		}
-	}
-	if len(elems) != result.Size() {
-		t.Fatalf("expected cpuset %s to have the same size as %v", result, elems)
-	}
-}
-
 func TestCPUSetSize(t *testing.T) {
 	testCases := []struct {
 		cpuset   CPUSet
 		expected int
 	}{
-		{NewCPUSet(), 0},
-		{NewCPUSet(5), 1},
-		{NewCPUSet(1, 2, 3, 4, 5), 5},
+		{New(), 0},
+		{New(5), 1},
+		{New(1, 2, 3, 4, 5), 5},
 	}
 
 	for _, c := range testCases {
@@ -61,9 +44,9 @@ func TestCPUSetIsEmpty(t *testing.T) {
 		cpuset   CPUSet
 		expected bool
 	}{
-		{NewCPUSet(), true},
-		{NewCPUSet(5), false},
-		{NewCPUSet(1, 2, 3, 4, 5), false},
+		{New(), true},
+		{New(5), false},
+		{New(1, 2, 3, 4, 5), false},
 	}
 
 	for _, c := range testCases {
@@ -80,9 +63,9 @@ func TestCPUSetContains(t *testing.T) {
 		mustContain    []int
 		mustNotContain []int
 	}{
-		{NewCPUSet(), []int{}, []int{1, 2, 3, 4, 5}},
-		{NewCPUSet(5), []int{5}, []int{1, 2, 3, 4}},
-		{NewCPUSet(1, 2, 4, 5), []int{1, 2, 4, 5}, []int{0, 3, 6}},
+		{New(), []int{}, []int{1, 2, 3, 4, 5}},
+		{New(5), []int{5}, []int{1, 2, 3, 4}},
+		{New(1, 2, 4, 5), []int{1, 2, 4, 5}, []int{0, 3, 6}},
 	}
 
 	for _, c := range testCases {
@@ -104,21 +87,21 @@ func TestCPUSetEqual(t *testing.T) {
 		s1 CPUSet
 		s2 CPUSet
 	}{
-		{NewCPUSet(), NewCPUSet()},
-		{NewCPUSet(5), NewCPUSet(5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(), New()},
+		{New(5), New(5)},
+		{New(1, 2, 3, 4, 5), New(1, 2, 3, 4, 5)},
 	}
 
 	shouldNotEqual := []struct {
 		s1 CPUSet
 		s2 CPUSet
 	}{
-		{NewCPUSet(), NewCPUSet(5)},
-		{NewCPUSet(5), NewCPUSet()},
-		{NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet()},
-		{NewCPUSet(5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(5)},
+		{New(), New(5)},
+		{New(5), New()},
+		{New(), New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), New()},
+		{New(5), New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), New(5)},
 	}
 
 	for _, c := range shouldEqual {
@@ -139,18 +122,18 @@ func TestCPUSetIsSubsetOf(t *testing.T) {
 		s2 CPUSet
 	}{
 		// A set is a subset of itself
-		{NewCPUSet(), NewCPUSet()},
-		{NewCPUSet(5), NewCPUSet(5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(), New()},
+		{New(5), New(5)},
+		{New(1, 2, 3, 4, 5), New(1, 2, 3, 4, 5)},
 
 		// Empty set is a subset of every set
-		{NewCPUSet(), NewCPUSet(5)},
-		{NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(), New(5)},
+		{New(), New(1, 2, 3, 4, 5)},
 
-		{NewCPUSet(5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(4, 5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(2, 3), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(5), New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3), New(1, 2, 3, 4, 5)},
+		{New(4, 5), New(1, 2, 3, 4, 5)},
+		{New(2, 3), New(1, 2, 3, 4, 5)},
 	}
 
 	shouldNotBeSubset := []struct {
@@ -170,55 +153,39 @@ func TestCPUSetIsSubsetOf(t *testing.T) {
 	}
 }
 
-func TestCPUSetUnionAll(t *testing.T) {
-	testCases := []struct {
-		s1       CPUSet
-		s2       CPUSet
-		s3       CPUSet
-		expected CPUSet
-	}{
-		{NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(4, 5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(), NewCPUSet(4), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 5), NewCPUSet(1, 2, 3, 4, 5)},
-	}
-	for _, c := range testCases {
-		s := []CPUSet{}
-		s = append(s, c.s2)
-		s = append(s, c.s3)
-		result := c.s1.UnionAll(s)
-		if !result.Equals(c.expected) {
-			t.Fatalf("expected the union of s1 and s2 to be [%v] (got [%v]), s1: [%v], s2: [%v]", c.expected, result, c.s1, c.s2)
-		}
-	}
-}
-
 func TestCPUSetUnion(t *testing.T) {
 	testCases := []struct {
 		s1       CPUSet
-		s2       CPUSet
+		others   []CPUSet
 		expected CPUSet
 	}{
-		{NewCPUSet(), NewCPUSet(), NewCPUSet()},
+		{New(5), []CPUSet{}, New(5)},
 
-		{NewCPUSet(), NewCPUSet(5), NewCPUSet(5)},
-		{NewCPUSet(5), NewCPUSet(), NewCPUSet(5)},
-		{NewCPUSet(5), NewCPUSet(5), NewCPUSet(5)},
+		{New(), []CPUSet{New()}, New()},
 
-		{NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(), []CPUSet{New(5)}, New(5)},
+		{New(5), []CPUSet{New()}, New(5)},
+		{New(5), []CPUSet{New(5)}, New(5)},
 
-		{NewCPUSet(5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(5), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(), []CPUSet{New(1, 2, 3, 4, 5)}, New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), []CPUSet{New()}, New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), []CPUSet{New(1, 2, 3, 4, 5)}, New(1, 2, 3, 4, 5)},
 
-		{NewCPUSet(1, 2), NewCPUSet(3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3), NewCPUSet(3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(5), []CPUSet{New(1, 2, 3, 4, 5)}, New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), []CPUSet{New(5)}, New(1, 2, 3, 4, 5)},
+
+		{New(1, 2), []CPUSet{New(3, 4, 5)}, New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3), []CPUSet{New(3, 4, 5)}, New(1, 2, 3, 4, 5)},
+
+		{New(), []CPUSet{New(1, 2, 3, 4, 5), New(4, 5)}, New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), []CPUSet{New(), New(4)}, New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), []CPUSet{New(1, 2, 3, 4, 5), New(1, 5)}, New(1, 2, 3, 4, 5)},
 	}
 
 	for _, c := range testCases {
-		result := c.s1.Union(c.s2)
+		result := c.s1.Union(c.others...)
 		if !result.Equals(c.expected) {
-			t.Fatalf("expected the union of s1 and s2 to be [%v] (got [%v]), s1: [%v], s2: [%v]", c.expected, result, c.s1, c.s2)
+			t.Fatalf("expected the union of s1 and s2 to be [%v] (got [%v]), others: [%v]", c.expected, result, c.others)
 		}
 	}
 }
@@ -229,21 +196,21 @@ func TestCPUSetIntersection(t *testing.T) {
 		s2       CPUSet
 		expected CPUSet
 	}{
-		{NewCPUSet(), NewCPUSet(), NewCPUSet()},
+		{New(), New(), New()},
 
-		{NewCPUSet(), NewCPUSet(5), NewCPUSet()},
-		{NewCPUSet(5), NewCPUSet(), NewCPUSet()},
-		{NewCPUSet(5), NewCPUSet(5), NewCPUSet(5)},
+		{New(), New(5), New()},
+		{New(5), New(), New()},
+		{New(5), New(5), New(5)},
 
-		{NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet()},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(), NewCPUSet()},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5)},
+		{New(), New(1, 2, 3, 4, 5), New()},
+		{New(1, 2, 3, 4, 5), New(), New()},
+		{New(1, 2, 3, 4, 5), New(1, 2, 3, 4, 5), New(1, 2, 3, 4, 5)},
 
-		{NewCPUSet(5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(5), NewCPUSet(5)},
+		{New(5), New(1, 2, 3, 4, 5), New(5)},
+		{New(1, 2, 3, 4, 5), New(5), New(5)},
 
-		{NewCPUSet(1, 2), NewCPUSet(3, 4, 5), NewCPUSet()},
-		{NewCPUSet(1, 2, 3), NewCPUSet(3, 4, 5), NewCPUSet(3)},
+		{New(1, 2), New(3, 4, 5), New()},
+		{New(1, 2, 3), New(3, 4, 5), New(3)},
 	}
 
 	for _, c := range testCases {
@@ -260,21 +227,21 @@ func TestCPUSetDifference(t *testing.T) {
 		s2       CPUSet
 		expected CPUSet
 	}{
-		{NewCPUSet(), NewCPUSet(), NewCPUSet()},
+		{New(), New(), New()},
 
-		{NewCPUSet(), NewCPUSet(5), NewCPUSet()},
-		{NewCPUSet(5), NewCPUSet(), NewCPUSet(5)},
-		{NewCPUSet(5), NewCPUSet(5), NewCPUSet()},
+		{New(), New(5), New()},
+		{New(5), New(), New(5)},
+		{New(5), New(5), New()},
 
-		{NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet()},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(), NewCPUSet(1, 2, 3, 4, 5)},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet()},
+		{New(), New(1, 2, 3, 4, 5), New()},
+		{New(1, 2, 3, 4, 5), New(), New(1, 2, 3, 4, 5)},
+		{New(1, 2, 3, 4, 5), New(1, 2, 3, 4, 5), New()},
 
-		{NewCPUSet(5), NewCPUSet(1, 2, 3, 4, 5), NewCPUSet()},
-		{NewCPUSet(1, 2, 3, 4, 5), NewCPUSet(5), NewCPUSet(1, 2, 3, 4)},
+		{New(5), New(1, 2, 3, 4, 5), New()},
+		{New(1, 2, 3, 4, 5), New(5), New(1, 2, 3, 4)},
 
-		{NewCPUSet(1, 2), NewCPUSet(3, 4, 5), NewCPUSet(1, 2)},
-		{NewCPUSet(1, 2, 3), NewCPUSet(3, 4, 5), NewCPUSet(1, 2)},
+		{New(1, 2), New(3, 4, 5), New(1, 2)},
+		{New(1, 2, 3), New(3, 4, 5), New(1, 2)},
 	}
 
 	for _, c := range testCases {
@@ -285,18 +252,18 @@ func TestCPUSetDifference(t *testing.T) {
 	}
 }
 
-func TestCPUSetToSlice(t *testing.T) {
+func TestCPUSetList(t *testing.T) {
 	testCases := []struct {
 		set      CPUSet
 		expected []int
 	}{
-		{NewCPUSet(), []int{}},
-		{NewCPUSet(5), []int{5}},
-		{NewCPUSet(1, 2, 3, 4, 5), []int{1, 2, 3, 4, 5}},
+		{New(), []int{}},
+		{New(5), []int{5}},
+		{New(1, 2, 3, 4, 5), []int{1, 2, 3, 4, 5}},
 	}
 
 	for _, c := range testCases {
-		result := c.set.ToSlice()
+		result := c.set.List()
 		if !reflect.DeepEqual(result, c.expected) {
 			t.Fatalf("expected set as slice to be [%v] (got [%v]), s: [%v]", c.expected, result, c.set)
 		}
@@ -308,10 +275,10 @@ func TestCPUSetString(t *testing.T) {
 		set      CPUSet
 		expected string
 	}{
-		{NewCPUSet(), ""},
-		{NewCPUSet(5), "5"},
-		{NewCPUSet(1, 2, 3, 4, 5), "1-5"},
-		{NewCPUSet(1, 2, 3, 5, 6, 8), "1-3,5-6,8"},
+		{New(), ""},
+		{New(5), "5"},
+		{New(1, 2, 3, 4, 5), "1-5"},
+		{New(1, 2, 3, 5, 6, 8), "1-3,5-6,8"},
 	}
 
 	for _, c := range testCases {
@@ -323,24 +290,43 @@ func TestCPUSetString(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
-	testCases := []struct {
+	positiveTestCases := []struct {
 		cpusetString string
 		expected     CPUSet
 	}{
-		{"", NewCPUSet()},
-		{"5", NewCPUSet(5)},
-		{"1,2,3,4,5", NewCPUSet(1, 2, 3, 4, 5)},
-		{"1-5", NewCPUSet(1, 2, 3, 4, 5)},
-		{"1-2,3-5", NewCPUSet(1, 2, 3, 4, 5)},
+		{"", New()},
+		{"5", New(5)},
+		{"1,2,3,4,5", New(1, 2, 3, 4, 5)},
+		{"1-5", New(1, 2, 3, 4, 5)},
+		{"1-2,3-5", New(1, 2, 3, 4, 5)},
+		{"5,4,3,2,1", New(1, 2, 3, 4, 5)},  // Range ordering
+		{"3-6,1-5", New(1, 2, 3, 4, 5, 6)}, // Overlapping ranges
+		{"3-3,5-5", New(3, 5)},             // Very short ranges
 	}
 
-	for _, c := range testCases {
+	for _, c := range positiveTestCases {
 		result, err := Parse(c.cpusetString)
 		if err != nil {
 			t.Fatalf("expected error not to have occurred: %v", err)
 		}
 		if !result.Equals(c.expected) {
 			t.Fatalf("expected string \"%s\" to parse as [%v] (got [%v])", c.cpusetString, c.expected, result)
+		}
+	}
+
+	negativeTestCases := []string{
+		// Non-numeric entries
+		"nonnumeric", "non-numeric", "no,numbers", "0-a", "a-0", "0,a", "a,0", "1-2,a,3-5",
+		// Incomplete sequences
+		"0,", "0,,", ",3", ",,3", "0,,3",
+		// Incomplete ranges and/or negative numbers
+		"-1", "1-", "1,2-,3", "1,-2,3", "-1--2", "--1", "1--",
+		// Reversed ranges
+		"3-0", "0--3"}
+	for _, c := range negativeTestCases {
+		result, err := Parse(c)
+		if err == nil {
+			t.Fatalf("expected parse failure of \"%s\", but it succeeded as \"%s\"", c, result.String())
 		}
 	}
 }

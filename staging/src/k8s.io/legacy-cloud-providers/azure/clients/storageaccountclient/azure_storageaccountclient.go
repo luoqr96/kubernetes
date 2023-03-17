@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -22,19 +23,20 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2019-06-01/storage"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
-	"github.com/Azure/go-autorest/autorest/to"
 
 	"k8s.io/client-go/util/flowcontrol"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	azclients "k8s.io/legacy-cloud-providers/azure/clients"
 	"k8s.io/legacy-cloud-providers/azure/clients/armclient"
 	"k8s.io/legacy-cloud-providers/azure/metrics"
 	"k8s.io/legacy-cloud-providers/azure/retry"
+	"k8s.io/utils/pointer"
 )
 
 var _ Interface = &Client{}
@@ -56,8 +58,12 @@ type Client struct {
 // New creates a new StorageAccount client with ratelimiting.
 func New(config *azclients.ClientConfig) *Client {
 	baseURI := config.ResourceManagerEndpoint
-	authorizer := autorest.NewBearerAuthorizer(config.ServicePrincipalToken)
-	armClient := armclient.New(authorizer, baseURI, "", APIVersion, config.Location, config.Backoff)
+	authorizer := config.Authorizer
+	apiVersion := APIVersion
+	if strings.EqualFold(config.CloudName, AzureStackCloudName) {
+		apiVersion = AzureStackCloudAPIVersion
+	}
+	armClient := armclient.New(authorizer, baseURI, config.UserAgent, apiVersion, config.Location, config.Backoff)
 	rateLimiterReader, rateLimiterWriter := azclients.NewRateLimiter(config.RateLimitConfig)
 
 	klog.V(2).Infof("Azure StorageAccountClient (read ops) using rate limit config: QPS=%g, bucket=%d",
@@ -364,8 +370,14 @@ func (c *Client) ListStorageAccountByResourceGroup(ctx context.Context, resource
 		return result, retry.GetError(resp, err)
 	}
 
-	for page.NotDone() {
-		result = append(result, *page.Response().Value...)
+	for {
+		result = append(result, page.Values()...)
+
+		// Abort the loop when there's no nextLink in the response.
+		if pointer.StringDeref(page.Response().NextLink, "") == "" {
+			break
+		}
+
 		if err = page.NextWithContext(ctx); err != nil {
 			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "storageAccount.list.next", resourceID, err)
 			return result, retry.GetError(page.Response().Response.Response, err)
@@ -388,12 +400,12 @@ func (c *Client) listResponder(resp *http.Response) (result storage.AccountListR
 // StorageAccountResultPreparer prepares a request to retrieve the next set of results.
 // It returns nil if no more results exist.
 func (c *Client) StorageAccountResultPreparer(ctx context.Context, lr storage.AccountListResult) (*http.Request, error) {
-	if lr.NextLink == nil || len(to.String(lr.NextLink)) < 1 {
+	if lr.NextLink == nil || len(pointer.StringDeref(lr.NextLink, "")) < 1 {
 		return nil, nil
 	}
 
 	decorators := []autorest.PrepareDecorator{
-		autorest.WithBaseURL(to.String(lr.NextLink)),
+		autorest.WithBaseURL(pointer.StringDeref(lr.NextLink, "")),
 	}
 	return c.armClient.PrepareGetRequest(ctx, decorators...)
 }

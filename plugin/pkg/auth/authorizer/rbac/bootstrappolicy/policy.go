@@ -17,16 +17,20 @@ limitations under the License.
 package bootstrappolicy
 
 import (
+	capi "k8s.io/api/certificates/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"k8s.io/apiserver/pkg/authentication/user"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
 	"k8s.io/kubernetes/pkg/features"
 )
 
+// Write and other vars are slices of the allowed verbs.
+// Label and Annotation are default maps of bootstrappolicy.
 var (
 	Write      = []string{"create", "update", "patch", "delete", "deletecollection"}
 	ReadWrite  = []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
@@ -38,23 +42,26 @@ var (
 )
 
 const (
-	legacyGroup         = ""
-	appsGroup           = "apps"
-	authenticationGroup = "authentication.k8s.io"
-	authorizationGroup  = "authorization.k8s.io"
-	autoscalingGroup    = "autoscaling"
-	batchGroup          = "batch"
-	certificatesGroup   = "certificates.k8s.io"
-	coordinationGroup   = "coordination.k8s.io"
-	discoveryGroup      = "discovery.k8s.io"
-	extensionsGroup     = "extensions"
-	policyGroup         = "policy"
-	rbacGroup           = "rbac.authorization.k8s.io"
-	storageGroup        = "storage.k8s.io"
-	resMetricsGroup     = "metrics.k8s.io"
-	customMetricsGroup  = "custom.metrics.k8s.io"
-	networkingGroup     = "networking.k8s.io"
-	eventsGroup         = "events.k8s.io"
+	legacyGroup            = ""
+	appsGroup              = "apps"
+	authenticationGroup    = "authentication.k8s.io"
+	authorizationGroup     = "authorization.k8s.io"
+	autoscalingGroup       = "autoscaling"
+	batchGroup             = "batch"
+	certificatesGroup      = "certificates.k8s.io"
+	coordinationGroup      = "coordination.k8s.io"
+	discoveryGroup         = "discovery.k8s.io"
+	extensionsGroup        = "extensions"
+	policyGroup            = "policy"
+	rbacGroup              = "rbac.authorization.k8s.io"
+	resourceGroup          = "resource.k8s.io"
+	storageGroup           = "storage.k8s.io"
+	resMetricsGroup        = "metrics.k8s.io"
+	customMetricsGroup     = "custom.metrics.k8s.io"
+	externalMetricsGroup   = "external.metrics.k8s.io"
+	networkingGroup        = "networking.k8s.io"
+	eventsGroup            = "events.k8s.io"
+	internalAPIServerGroup = "internal.apiserver.k8s.io"
 )
 
 func addDefaultMetadata(obj runtime.Object) {
@@ -97,6 +104,7 @@ func addClusterRoleBindingLabel(rolebindings []rbacv1.ClusterRoleBinding) {
 	return
 }
 
+// NodeRules returns node policy rules, it is slice of rbacv1.PolicyRule.
 func NodeRules() []rbacv1.PolicyRule {
 	nodePolicyRules := []rbacv1.PolicyRule{
 		// Needed to check API access.  These creates are non-mutating
@@ -148,36 +156,31 @@ func NodeRules() []rbacv1.PolicyRule {
 
 		// CSI
 		rbacv1helpers.NewRule("get").Groups(storageGroup).Resources("volumeattachments").RuleOrDie(),
-	}
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.ExpandPersistentVolumes) {
-		// Use the Node authorization mode to limit a node to update status of pvc objects referenced by pods bound to itself.
-		// Use the NodeRestriction admission plugin to limit a node to just update the status stanza.
-		pvcStatusPolicyRule := rbacv1helpers.NewRule("get", "update", "patch").Groups(legacyGroup).Resources("persistentvolumeclaims/status").RuleOrDie()
-		nodePolicyRules = append(nodePolicyRules, pvcStatusPolicyRule)
-	}
-
-	if utilfeature.DefaultFeatureGate.Enabled(features.TokenRequest) {
 		// Use the Node authorization to limit a node to create tokens for service accounts running on that node
 		// Use the NodeRestriction admission plugin to limit a node to create tokens bound to pods on that node
-		tokenRequestRule := rbacv1helpers.NewRule("create").Groups(legacyGroup).Resources("serviceaccounts/token").RuleOrDie()
-		nodePolicyRules = append(nodePolicyRules, tokenRequestRule)
+		rbacv1helpers.NewRule("create").Groups(legacyGroup).Resources("serviceaccounts/token").RuleOrDie(),
 	}
+
+	// Use the Node authorization mode to limit a node to update status of pvc objects referenced by pods bound to itself.
+	// Use the NodeRestriction admission plugin to limit a node to just update the status stanza.
+	pvcStatusPolicyRule := rbacv1helpers.NewRule("get", "update", "patch").Groups(legacyGroup).Resources("persistentvolumeclaims/status").RuleOrDie()
+	nodePolicyRules = append(nodePolicyRules, pvcStatusPolicyRule)
 
 	// CSI
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSIDriverRegistry) {
-		csiDriverRule := rbacv1helpers.NewRule("get", "watch", "list").Groups("storage.k8s.io").Resources("csidrivers").RuleOrDie()
-		nodePolicyRules = append(nodePolicyRules, csiDriverRule)
-	}
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSINodeInfo) {
-		csiNodeInfoRule := rbacv1helpers.NewRule("get", "create", "update", "patch", "delete").Groups("storage.k8s.io").Resources("csinodes").RuleOrDie()
-		nodePolicyRules = append(nodePolicyRules, csiNodeInfoRule)
-	}
+	csiDriverRule := rbacv1helpers.NewRule("get", "watch", "list").Groups("storage.k8s.io").Resources("csidrivers").RuleOrDie()
+	nodePolicyRules = append(nodePolicyRules, csiDriverRule)
+	csiNodeInfoRule := rbacv1helpers.NewRule("get", "create", "update", "patch", "delete").Groups("storage.k8s.io").Resources("csinodes").RuleOrDie()
+	nodePolicyRules = append(nodePolicyRules, csiNodeInfoRule)
 
 	// RuntimeClass
-	if utilfeature.DefaultFeatureGate.Enabled(features.RuntimeClass) {
-		nodePolicyRules = append(nodePolicyRules, rbacv1helpers.NewRule("get", "list", "watch").Groups("node.k8s.io").Resources("runtimeclasses").RuleOrDie())
+	nodePolicyRules = append(nodePolicyRules, rbacv1helpers.NewRule("get", "list", "watch").Groups("node.k8s.io").Resources("runtimeclasses").RuleOrDie())
+
+	// DRA Resource Claims
+	if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
+		nodePolicyRules = append(nodePolicyRules, rbacv1helpers.NewRule("get").Groups(resourceGroup).Resources("resourceclaims").RuleOrDie())
 	}
+
 	return nodePolicyRules
 }
 
@@ -193,7 +196,8 @@ func ClusterRoles() []rbacv1.ClusterRole {
 			},
 		},
 		{
-			// a role which provides just enough power to determine if the server is ready and discover API versions for negotiation
+			// a role which provides just enough power to determine if the server is
+			// ready and discover API versions for negotiation
 			ObjectMeta: metav1.ObjectMeta{Name: "system:discovery"},
 			Rules: []rbacv1.PolicyRule{
 				rbacv1helpers.NewRule("get").URLs(
@@ -206,12 +210,34 @@ func ClusterRoles() []rbacv1.ClusterRole {
 			},
 		},
 		{
+			// a role which provides minimal read access to the monitoring endpoints
+			// (i.e. /metrics, /livez/*, /readyz/*, /healthz/*, /livez, /readyz, /healthz)
+			// The splatted health check endpoints allow read access to individual health check
+			// endpoints which may contain more sensitive cluster information information
+			ObjectMeta: metav1.ObjectMeta{Name: "system:monitoring"},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("get").URLs(
+					"/metrics", "/metrics/slis",
+					"/livez", "/readyz", "/healthz",
+					"/livez/*", "/readyz/*", "/healthz/*",
+				).RuleOrDie(),
+			},
+		},
+	}
+
+	basicUserRules := []rbacv1.PolicyRule{
+		rbacv1helpers.NewRule("create").Groups(authorizationGroup).Resources("selfsubjectaccessreviews", "selfsubjectrulesreviews").RuleOrDie(),
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.APISelfSubjectReview) {
+		basicUserRules = append(basicUserRules, rbacv1helpers.NewRule("create").Groups(authenticationGroup).Resources("selfsubjectreviews").RuleOrDie())
+	}
+
+	roles = append(roles, []rbacv1.ClusterRole{
+		{
 			// a role which provides minimal resource access to allow a "normal" user to learn information about themselves
 			ObjectMeta: metav1.ObjectMeta{Name: "system:basic-user"},
-			Rules: []rbacv1.PolicyRule{
-				// TODO add future selfsubjectrulesreview, project request APIs, project listing APIs
-				rbacv1helpers.NewRule("create").Groups(authorizationGroup).Resources("selfsubjectaccessreviews", "selfsubjectrulesreviews").RuleOrDie(),
-			},
+			Rules:      basicUserRules,
 		},
 		{
 			// a role which provides just enough power read insensitive cluster information
@@ -272,8 +298,10 @@ func ClusterRoles() []rbacv1.ClusterRole {
 				rbacv1helpers.NewRule("impersonate").Groups(legacyGroup).Resources("serviceaccounts").RuleOrDie(),
 
 				rbacv1helpers.NewRule(Write...).Groups(legacyGroup).Resources("pods", "pods/attach", "pods/proxy", "pods/exec", "pods/portforward").RuleOrDie(),
+				rbacv1helpers.NewRule("create").Groups(legacyGroup).Resources("pods/eviction").RuleOrDie(),
 				rbacv1helpers.NewRule(Write...).Groups(legacyGroup).Resources("replicationcontrollers", "replicationcontrollers/scale", "serviceaccounts",
-					"services", "services/proxy", "endpoints", "persistentvolumeclaims", "configmaps", "secrets").RuleOrDie(),
+					"services", "services/proxy", "persistentvolumeclaims", "configmaps", "secrets", "events").RuleOrDie(),
+				rbacv1helpers.NewRule("create").Groups(legacyGroup).Resources("serviceaccounts/token").RuleOrDie(),
 
 				rbacv1helpers.NewRule(Write...).Groups(appsGroup).Resources(
 					"statefulsets", "statefulsets/scale",
@@ -293,6 +321,8 @@ func ClusterRoles() []rbacv1.ClusterRole {
 				rbacv1helpers.NewRule(Write...).Groups(policyGroup).Resources("poddisruptionbudgets").RuleOrDie(),
 
 				rbacv1helpers.NewRule(Write...).Groups(networkingGroup).Resources("networkpolicies", "ingresses").RuleOrDie(),
+
+				rbacv1helpers.NewRule(ReadWrite...).Groups(coordinationGroup).Resources("leases").RuleOrDie(),
 			},
 		},
 		{
@@ -307,6 +337,8 @@ func ClusterRoles() []rbacv1.ClusterRole {
 				// read access to namespaces at the namespace scope means you can read *this* namespace.  This can be used as an
 				// indicator of which namespaces you have access to.
 				rbacv1helpers.NewRule(Read...).Groups(legacyGroup).Resources("namespaces").RuleOrDie(),
+
+				rbacv1helpers.NewRule(Read...).Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
 
 				rbacv1helpers.NewRule(Read...).Groups(appsGroup).Resources(
 					"controllerrevisions",
@@ -338,7 +370,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
 		},
 		{
 			// a role for nodes to use to have the access they need for running pods
-			ObjectMeta: metav1.ObjectMeta{Name: "system:node"},
+			ObjectMeta: metav1.ObjectMeta{Name: systemNodeRoleName},
 			Rules:      NodeRules(),
 		},
 		{
@@ -359,7 +391,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
 				rbacv1helpers.NewRule("get", "list", "watch").Groups(legacyGroup).Resources("nodes").RuleOrDie(),
 				// Allow all API calls to the nodes
 				rbacv1helpers.NewRule("proxy").Groups(legacyGroup).Resources("nodes").RuleOrDie(),
-				rbacv1helpers.NewRule("*").Groups(legacyGroup).Resources("nodes/proxy", "nodes/metrics", "nodes/spec", "nodes/stats", "nodes/log").RuleOrDie(),
+				rbacv1helpers.NewRule("*").Groups(legacyGroup).Resources("nodes/proxy", "nodes/metrics", "nodes/stats", "nodes/log").RuleOrDie(),
 			},
 		},
 		{
@@ -456,7 +488,42 @@ func ClusterRoles() []rbacv1.ClusterRole {
 				rbacv1helpers.NewRule(ReadUpdate...).Groups(legacyGroup).Resources("persistentvolumeclaims").RuleOrDie(),
 			},
 		},
-	}
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "system:certificates.k8s.io:legacy-unknown-approver"},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("approve").Groups(certificatesGroup).Resources("signers").Names(capi.LegacyUnknownSignerName).RuleOrDie(),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "system:certificates.k8s.io:kubelet-serving-approver"},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("approve").Groups(certificatesGroup).Resources("signers").Names(capi.KubeletServingSignerName).RuleOrDie(),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "system:certificates.k8s.io:kube-apiserver-client-approver"},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("approve").Groups(certificatesGroup).Resources("signers").Names(capi.KubeAPIServerClientSignerName).RuleOrDie(),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "system:certificates.k8s.io:kube-apiserver-client-kubelet-approver"},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("approve").Groups(certificatesGroup).Resources("signers").Names(capi.KubeAPIServerClientKubeletSignerName).RuleOrDie(),
+			},
+		},
+	}...)
+
+	// Add the cluster role for reading the ServiceAccountIssuerDiscovery endpoints
+	roles = append(roles, rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "system:service-account-issuer-discovery"},
+		Rules: []rbacv1.PolicyRule{
+			rbacv1helpers.NewRule("get").URLs(
+				"/.well-known/openid-configuration",
+				"/openid/v1/jwks",
+			).RuleOrDie(),
+		},
+	})
 
 	// node-proxier role is used by kube-proxy.
 	nodeProxierRules := []rbacv1.PolicyRule{
@@ -465,9 +532,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
 
 		eventsRule(),
 	}
-	if utilfeature.DefaultFeatureGate.Enabled(features.EndpointSlice) {
-		nodeProxierRules = append(nodeProxierRules, rbacv1helpers.NewRule("list", "watch").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie())
-	}
+	nodeProxierRules = append(nodeProxierRules, rbacv1helpers.NewRule("list", "watch").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie())
 	roles = append(roles, rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "system:node-proxier"},
 		Rules:      nodeProxierRules,
@@ -500,6 +565,19 @@ func ClusterRoles() []rbacv1.ClusterRole {
 		rbacv1helpers.NewRule("create").Groups(authorizationGroup).Resources("subjectaccessreviews").RuleOrDie(),
 		// Needed for volume limits
 		rbacv1helpers.NewRule(Read...).Groups(storageGroup).Resources("csinodes").RuleOrDie(),
+		// Needed for namespaceSelector feature in pod affinity
+		rbacv1helpers.NewRule(Read...).Groups(legacyGroup).Resources("namespaces").RuleOrDie(),
+		rbacv1helpers.NewRule(Read...).Groups(storageGroup).Resources("csidrivers").RuleOrDie(),
+		rbacv1helpers.NewRule(Read...).Groups(storageGroup).Resources("csistoragecapacities").RuleOrDie(),
+	}
+	// Needed for dynamic resource allocation.
+	if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
+		kubeSchedulerRules = append(kubeSchedulerRules,
+			rbacv1helpers.NewRule(Read...).Groups(resourceGroup).Resources("resourceclaims", "resourceclasses").RuleOrDie(),
+			rbacv1helpers.NewRule(ReadUpdate...).Groups(resourceGroup).Resources("resourceclaims/status").RuleOrDie(),
+			rbacv1helpers.NewRule(ReadWrite...).Groups(resourceGroup).Resources("podschedulings").RuleOrDie(),
+			rbacv1helpers.NewRule(Read...).Groups(resourceGroup).Resources("podschedulings/status").RuleOrDie(),
+		)
 	}
 	roles = append(roles, rbacv1.ClusterRole{
 		// a role to use for the kube-scheduler
@@ -517,6 +595,7 @@ const systemNodeRoleName = "system:node"
 func ClusterRoleBindings() []rbacv1.ClusterRoleBinding {
 	rolebindings := []rbacv1.ClusterRoleBinding{
 		rbacv1helpers.NewClusterBinding("cluster-admin").Groups(user.SystemPrivilegedGroup).BindingOrDie(),
+		rbacv1helpers.NewClusterBinding("system:monitoring").Groups(user.MonitoringGroup).BindingOrDie(),
 		rbacv1helpers.NewClusterBinding("system:discovery").Groups(user.AllAuthenticated).BindingOrDie(),
 		rbacv1helpers.NewClusterBinding("system:basic-user").Groups(user.AllAuthenticated).BindingOrDie(),
 		rbacv1helpers.NewClusterBinding("system:public-info-viewer").Groups(user.AllAuthenticated, user.AllUnauthenticated).BindingOrDie(),
@@ -534,11 +613,24 @@ func ClusterRoleBindings() []rbacv1.ClusterRoleBinding {
 		},
 	}
 
+	// Allow all in-cluster workloads (via their service accounts) to read the OIDC discovery endpoints.
+	// Users with certain forms of write access (create pods, create secrets, create service accounts, etc)
+	// can gain access to a service account identity which would allow them to access this information.
+	// This includes the issuer URL, which is already present in the SA token JWT.  Similarly, SAs can
+	// already gain this same info via introspection of their own token.  Since this discovery endpoint
+	// points to what issued all service account tokens, it seems fitting for SAs to have this access.
+	// Defer to the cluster admin with regard to binding directly to all authenticated and/or
+	// unauthenticated users.
+	rolebindings = append(rolebindings,
+		rbacv1helpers.NewClusterBinding("system:service-account-issuer-discovery").Groups(serviceaccount.AllServiceAccountsGroup).BindingOrDie(),
+	)
+
 	addClusterRoleBindingLabel(rolebindings)
 
 	return rolebindings
 }
 
+// ClusterRolesToAggregate maps from previous clusterrole name to the new clusterrole name
 func ClusterRolesToAggregate() map[string]string {
 	return map[string]string{
 		"admin": "system:aggregate-to-admin",

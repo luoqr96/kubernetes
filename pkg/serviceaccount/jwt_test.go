@@ -18,6 +18,7 @@ package serviceaccount_test
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	typedv1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	v1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/keyutil"
@@ -59,11 +61,12 @@ WwIDAQAB
 
 // Obtained by:
 //
-//   1. Serializing rsaPublicKey as DER
-//   2. Taking the SHA256 of the DER bytes
-//   3. URLSafe Base64-encoding the sha bytes
+//  1. Serializing rsaPublicKey as DER
+//  2. Taking the SHA256 of the DER bytes
+//  3. URLSafe Base64-encoding the sha bytes
 const rsaKeyID = "JHJehTTTZlsspKHT-GaJxK7Kd1NQgZJu3fyK6K_QDYU"
 
+// Fake value for testing.
 const rsaPrivateKey = `-----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEA249XwEo9k4tM8fMxV7zxOhcrP+WvXn917koM5Qr2ZXs4vo26
 e4ytdlrV0bQ9SlcLpQVSYjIxNfhTZdDt+ecIzshKuv1gKIxbbLQMOuK1eA/4HALy
@@ -94,6 +97,7 @@ X024wzbiw1q07jFCyfQmODzURAx1VNT7QVUMdz/N8vy47/H40AZJ
 `
 
 // openssl ecparam -name prime256v1 -genkey -noout -out ecdsa256.pem
+// Fake value for testing.
 const ecdsaPrivateKey = `-----BEGIN EC PRIVATE KEY-----
 MHcCAQEEIEZmTmUhuanLjPA2CLquXivuwBDHTt5XYwgIr/kA1LtRoAoGCCqGSM49
 AwEHoUQDQgAEH6cuzP8XuD5wal6wf9M6xDljTOPLX2i8uIp/C/ASqiIGUeeKQtX0
@@ -108,18 +112,24 @@ X2i8uIp/C/ASqiIGUeeKQtX0/IR3qCXyThP/dbCiHrF3v1cuhBOHY8CLVg==
 
 // Obtained by:
 //
-//   1. Serializing ecdsaPublicKey as DER
-//   2. Taking the SHA256 of the DER bytes
-//   3. URLSafe Base64-encoding the sha bytes
+//  1. Serializing ecdsaPublicKey as DER
+//  2. Taking the SHA256 of the DER bytes
+//  3. URLSafe Base64-encoding the sha bytes
 const ecdsaKeyID = "SoABiieYuNx4UdqYvZRVeuC6SihxgLrhLy9peHMHpTc"
 
 func getPrivateKey(data string) interface{} {
-	key, _ := keyutil.ParsePrivateKeyPEM([]byte(data))
+	key, err := keyutil.ParsePrivateKeyPEM([]byte(data))
+	if err != nil {
+		panic(fmt.Errorf("unexpected error parsing private key: %v", err))
+	}
 	return key
 }
 
 func getPublicKey(data string) interface{} {
-	keys, _ := keyutil.ParsePublicKeysPEM([]byte(data))
+	keys, err := keyutil.ParsePublicKeysPEM([]byte(data))
+	if err != nil {
+		panic(fmt.Errorf("unexpected error parsing public key: %v", err))
+	}
 	return keys[0]
 }
 
@@ -184,12 +194,22 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 
 	checkJSONWebSignatureHasKeyID(t, ecdsaToken, ecdsaKeyID)
 
-	// Generate signer with same keys as RSA signer but different issuer
+	// Generate signer with same keys as RSA signer but different unrecognized issuer
 	badIssuerGenerator, err := serviceaccount.JWTTokenGenerator("foo", getPrivateKey(rsaPrivateKey))
 	if err != nil {
 		t.Fatalf("error making generator: %v", err)
 	}
 	badIssuerToken, err := badIssuerGenerator.GenerateToken(serviceaccount.LegacyClaims(*serviceAccount, *rsaSecret))
+	if err != nil {
+		t.Fatalf("error generating token: %v", err)
+	}
+
+	// Generate signer with same keys as RSA signer but different recognized issuer
+	differentIssuerGenerator, err := serviceaccount.JWTTokenGenerator("bar", getPrivateKey(rsaPrivateKey))
+	if err != nil {
+		t.Fatalf("error making generator: %v", err)
+	}
+	differentIssuerToken, err := differentIssuerGenerator.GenerateToken(serviceaccount.LegacyClaims(*serviceAccount, *rsaSecret))
 	if err != nil {
 		t.Fatalf("error generating token: %v", err)
 	}
@@ -242,6 +262,16 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 			Keys:        []interface{}{getPublicKey(rsaPublicKey)},
 			ExpectedErr: false,
 			ExpectedOK:  false,
+		},
+		"valid key, different issuer (rsa)": {
+			Token:            differentIssuerToken,
+			Client:           nil,
+			Keys:             []interface{}{getPublicKey(rsaPublicKey)},
+			ExpectedErr:      false,
+			ExpectedOK:       true,
+			ExpectedUserName: expectedUserName,
+			ExpectedUserUID:  expectedUserUID,
+			ExpectedGroups:   []string{"system:serviceaccounts", "system:serviceaccounts:test"},
 		},
 		"valid key (ecdsa)": {
 			Token:            ecdsaToken,
@@ -304,16 +334,24 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 		getter := serviceaccountcontroller.NewGetterFromClient(
 			tc.Client,
 			v1listers.NewSecretLister(newIndexer(func(namespace, name string) (interface{}, error) {
-				return tc.Client.CoreV1().Secrets(namespace).Get(name, metav1.GetOptions{})
+				return tc.Client.CoreV1().Secrets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 			})),
 			v1listers.NewServiceAccountLister(newIndexer(func(namespace, name string) (interface{}, error) {
-				return tc.Client.CoreV1().ServiceAccounts(namespace).Get(name, metav1.GetOptions{})
+				return tc.Client.CoreV1().ServiceAccounts(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 			})),
 			v1listers.NewPodLister(newIndexer(func(namespace, name string) (interface{}, error) {
-				return tc.Client.CoreV1().Pods(namespace).Get(name, metav1.GetOptions{})
+				return tc.Client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 			})),
 		)
-		authn := serviceaccount.JWTTokenAuthenticator(serviceaccount.LegacyIssuer, tc.Keys, auds, serviceaccount.NewLegacyValidator(tc.Client != nil, getter))
+		var secretsWriter typedv1core.SecretsGetter
+		if tc.Client != nil {
+			secretsWriter = tc.Client.CoreV1()
+		}
+		validator, err := serviceaccount.NewLegacyValidator(tc.Client != nil, getter, secretsWriter)
+		if err != nil {
+			t.Fatalf("While creating legacy validator, err: %v", err)
+		}
+		authn := serviceaccount.JWTTokenAuthenticator([]string{serviceaccount.LegacyIssuer, "bar"}, tc.Keys, auds, validator)
 
 		// An invalid, non-JWT token should always fail
 		ctx := authenticator.WithAudiences(context.Background(), auds)

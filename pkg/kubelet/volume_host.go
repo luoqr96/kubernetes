@@ -21,25 +21,24 @@ import (
 	"net"
 	"runtime"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 	utilexec "k8s.io/utils/exec"
-	"k8s.io/utils/mount"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
-	storagelisters "k8s.io/client-go/listers/storage/v1beta1"
+	storagelisters "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/configmap"
 	"k8s.io/kubernetes/pkg/kubelet/secret"
 	"k8s.io/kubernetes/pkg/kubelet/token"
+	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
@@ -65,17 +64,15 @@ func NewInitializedVolumePluginMgr(
 	var csiDriverLister storagelisters.CSIDriverLister
 	var csiDriversSynced cache.InformerSynced
 	const resyncPeriod = 0
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSIDriverRegistry) {
-		// Don't initialize if kubeClient is nil
-		if kubelet.kubeClient != nil {
-			informerFactory = informers.NewSharedInformerFactory(kubelet.kubeClient, resyncPeriod)
-			csiDriverInformer := informerFactory.Storage().V1beta1().CSIDrivers()
-			csiDriverLister = csiDriverInformer.Lister()
-			csiDriversSynced = csiDriverInformer.Informer().HasSynced
+	// Don't initialize if kubeClient is nil
+	if kubelet.kubeClient != nil {
+		informerFactory = informers.NewSharedInformerFactory(kubelet.kubeClient, resyncPeriod)
+		csiDriverInformer := informerFactory.Storage().V1().CSIDrivers()
+		csiDriverLister = csiDriverInformer.Lister()
+		csiDriversSynced = csiDriverInformer.Informer().HasSynced
 
-		} else {
-			klog.Warning("kubeClient is nil. Skip initialization of CSIDriverLister")
-		}
+	} else {
+		klog.InfoS("KubeClient is nil. Skip initialization of CSIDriverLister")
 	}
 
 	kvh := &kubeletVolumeHost{
@@ -131,6 +128,16 @@ func (kvh *kubeletVolumeHost) GetPodsDir() string {
 	return kvh.kubelet.getPodsDir()
 }
 
+// GetHostIDsForPod if the pod uses user namespaces, takes the uid and gid
+// inside the container and returns the host UID and GID those are mapped to on
+// the host. If containerUID/containerGID is nil, then it returns the host
+// UID/GID for ID 0 inside the container.
+// If the pod is not using user namespaces, as there is no mapping needed, the
+// same containerUID and containerGID params are returned.
+func (kvh *kubeletVolumeHost) GetHostIDsForPod(pod *v1.Pod, containerUID, containerGID *int64) (hostUID, hostGID *int64, err error) {
+	return kvh.kubelet.getHostIDsForPod(pod, containerUID, containerGID)
+}
+
 func (kvh *kubeletVolumeHost) GetPodVolumeDir(podUID types.UID, pluginName string, volumeName string) string {
 	dir := kvh.kubelet.getPodVolumeDir(podUID, pluginName, volumeName)
 	if runtime.GOOS == "windows" {
@@ -155,6 +162,11 @@ func (kvh *kubeletVolumeHost) GetSubpather() subpath.Interface {
 	return kvh.kubelet.subpather
 }
 
+func (kvh *kubeletVolumeHost) GetFilteredDialOptions() *proxyutil.FilteredDialOptions {
+	// FilteredDial is not needed in the kubelet.
+	return nil
+}
+
 func (kvh *kubeletVolumeHost) GetHostUtil() hostutil.HostUtils {
 	return kvh.kubelet.hostutil
 }
@@ -174,13 +186,13 @@ func (kvh *kubeletVolumeHost) CSIDriversSynced() cache.InformerSynced {
 // WaitForCacheSync is a helper function that waits for cache sync for CSIDriverLister
 func (kvh *kubeletVolumeHost) WaitForCacheSync() error {
 	if kvh.csiDriversSynced == nil {
-		klog.Error("csiDriversSynced not found on KubeletVolumeHost")
+		klog.ErrorS(nil, "CsiDriversSynced not found on KubeletVolumeHost")
 		return fmt.Errorf("csiDriversSynced not found on KubeletVolumeHost")
 	}
 
 	synced := []cache.InformerSynced{kvh.csiDriversSynced}
 	if !cache.WaitForCacheSync(wait.NeverStop, synced...) {
-		klog.Warning("failed to wait for cache sync for CSIDriverLister")
+		klog.InfoS("Failed to wait for cache sync for CSIDriverLister")
 		return fmt.Errorf("failed to wait for cache sync for CSIDriverLister")
 	}
 
@@ -229,7 +241,11 @@ func (kvh *kubeletVolumeHost) GetHostName() string {
 }
 
 func (kvh *kubeletVolumeHost) GetHostIP() (net.IP, error) {
-	return kvh.kubelet.GetHostIP()
+	hostIPs, err := kvh.kubelet.GetHostIPs()
+	if err != nil {
+		return nil, err
+	}
+	return hostIPs[0], err
 }
 
 func (kvh *kubeletVolumeHost) GetNodeAllocatable() (v1.ResourceList, error) {
@@ -241,11 +257,21 @@ func (kvh *kubeletVolumeHost) GetNodeAllocatable() (v1.ResourceList, error) {
 }
 
 func (kvh *kubeletVolumeHost) GetSecretFunc() func(namespace, name string) (*v1.Secret, error) {
-	return kvh.secretManager.GetSecret
+	if kvh.secretManager != nil {
+		return kvh.secretManager.GetSecret
+	}
+	return func(namespace, name string) (*v1.Secret, error) {
+		return nil, fmt.Errorf("not supported due to running kubelet in standalone mode")
+	}
 }
 
 func (kvh *kubeletVolumeHost) GetConfigMapFunc() func(namespace, name string) (*v1.ConfigMap, error) {
-	return kvh.configMapManager.GetConfigMap
+	if kvh.configMapManager != nil {
+		return kvh.configMapManager.GetConfigMap
+	}
+	return func(namespace, name string) (*v1.ConfigMap, error) {
+		return nil, fmt.Errorf("not supported due to running kubelet in standalone mode")
+	}
 }
 
 func (kvh *kubeletVolumeHost) GetServiceAccountTokenFunc() func(namespace, name string, tr *authenticationv1.TokenRequest) (*authenticationv1.TokenRequest, error) {
@@ -262,6 +288,20 @@ func (kvh *kubeletVolumeHost) GetNodeLabels() (map[string]string, error) {
 		return nil, fmt.Errorf("error retrieving node: %v", err)
 	}
 	return node.Labels, nil
+}
+
+func (kvh *kubeletVolumeHost) GetAttachedVolumesFromNodeStatus() (map[v1.UniqueVolumeName]string, error) {
+	node, err := kvh.kubelet.GetNode()
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving node: %v", err)
+	}
+	attachedVolumes := node.Status.VolumesAttached
+	result := map[v1.UniqueVolumeName]string{}
+	for i := range attachedVolumes {
+		attachedVolume := attachedVolumes[i]
+		result[attachedVolume.Name] = attachedVolume.DevicePath
+	}
+	return result, nil
 }
 
 func (kvh *kubeletVolumeHost) GetNodeName() types.NodeName {

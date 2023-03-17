@@ -17,16 +17,20 @@ limitations under the License.
 package windows
 
 import (
+	"context"
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	admissionapi "k8s.io/pod-security-admission/api"
+
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
 
@@ -36,12 +40,13 @@ const (
 )
 
 var (
-	windowsBusyBoximage = imageutils.GetE2EImage(imageutils.TestWebserver)
-	linuxBusyBoxImage   = "docker.io/library/nginx:1.15-alpine"
+	windowsBusyBoximage = imageutils.GetE2EImage(imageutils.Agnhost)
+	linuxBusyBoxImage   = imageutils.GetE2EImage(imageutils.Nginx)
 )
 
 var _ = SIGDescribe("Hybrid cluster network", func() {
 	f := framework.NewDefaultFramework("hybrid-network")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		e2eskipper.SkipUnlessNodeOSDistroIs("windows")
@@ -49,50 +54,81 @@ var _ = SIGDescribe("Hybrid cluster network", func() {
 
 	ginkgo.Context("for all supported CNIs", func() {
 
-		ginkgo.It("should have stable networking for Linux and Windows pods", func() {
-			ginkgo.By("creating linux and windows pods")
+		ginkgo.It("should have stable networking for Linux and Windows pods", func(ctx context.Context) {
+
 			linuxPod := createTestPod(f, linuxBusyBoxImage, linuxOS)
+			ginkgo.By("creating a linux pod and waiting for it to be running")
+			linuxPod = e2epod.NewPodClient(f).CreateSync(ctx, linuxPod)
+
 			windowsPod := createTestPod(f, windowsBusyBoximage, windowsOS)
 
-			ginkgo.By("checking connectivity to 8.8.8.8 53 (google.com) from Linux")
-			assertConsistentConnectivity(f, linuxPod.ObjectMeta.Name, linuxOS, linuxCheck("8.8.8.8", 53))
+			windowsPod.Spec.Containers[0].Args = []string{"test-webserver"}
+			ginkgo.By("creating a windows pod and waiting for it to be running")
+			windowsPod = e2epod.NewPodClient(f).CreateSync(ctx, windowsPod)
 
-			ginkgo.By("checking connectivity to www.google.com from Windows")
-			assertConsistentConnectivity(f, windowsPod.ObjectMeta.Name, windowsOS, windowsCheck("www.google.com"))
+			ginkgo.By("verifying pod internal connectivity to the cluster dataplane")
 
 			ginkgo.By("checking connectivity from Linux to Windows")
-			assertConsistentConnectivity(f, linuxPod.ObjectMeta.Name, linuxOS, linuxCheck(windowsPod.Status.PodIP, 80))
+			assertConsistentConnectivity(ctx, f, linuxPod.ObjectMeta.Name, linuxOS, linuxCheck(windowsPod.Status.PodIP, 80))
 
 			ginkgo.By("checking connectivity from Windows to Linux")
-			assertConsistentConnectivity(f, windowsPod.ObjectMeta.Name, windowsOS, windowsCheck(linuxPod.Status.PodIP))
+			assertConsistentConnectivity(ctx, f, windowsPod.ObjectMeta.Name, windowsOS, windowsCheck(linuxPod.Status.PodIP))
 
+		})
+
+		ginkgo.It("should provide Internet connection for Linux containers using DNS [Feature:Networking-DNS]", func(ctx context.Context) {
+			linuxPod := createTestPod(f, linuxBusyBoxImage, linuxOS)
+			ginkgo.By("creating a linux pod and waiting for it to be running")
+			linuxPod = e2epod.NewPodClient(f).CreateSync(ctx, linuxPod)
+
+			ginkgo.By("verifying pod external connectivity to the internet")
+
+			ginkgo.By("checking connectivity to 8.8.8.8 53 (google.com) from Linux")
+			assertConsistentConnectivity(ctx, f, linuxPod.ObjectMeta.Name, linuxOS, linuxCheck("8.8.8.8", 53))
+		})
+
+		ginkgo.It("should provide Internet connection for Windows containers using DNS [Feature:Networking-DNS]", func(ctx context.Context) {
+			windowsPod := createTestPod(f, windowsBusyBoximage, windowsOS)
+			ginkgo.By("creating a windows pod and waiting for it to be running")
+			windowsPod = e2epod.NewPodClient(f).CreateSync(ctx, windowsPod)
+
+			ginkgo.By("verifying pod external connectivity to the internet")
+
+			ginkgo.By("checking connectivity to 8.8.8.8 53 (google.com) from Windows")
+			assertConsistentConnectivity(ctx, f, windowsPod.ObjectMeta.Name, windowsOS, windowsCheck("www.google.com"))
 		})
 
 	})
 })
 
 var (
-	duration     = "10s"
-	pollInterval = "1s"
-	timeout      = 10 // seconds
+	duration       = "10s"
+	pollInterval   = "1s"
+	timeoutSeconds = 10
 )
 
-func assertConsistentConnectivity(f *framework.Framework, podName string, os string, cmd []string) {
-	gomega.Consistently(func() error {
+func assertConsistentConnectivity(ctx context.Context, f *framework.Framework, podName string, os string, cmd []string) {
+	connChecker := func() error {
 		ginkgo.By(fmt.Sprintf("checking connectivity of %s-container in %s", os, podName))
-		_, _, err := f.ExecCommandInContainerWithFullOutput(podName, os+"-container", cmd...)
+		// TODO, we should be retrying this similar to what is done in DialFromNode, in the test/e2e/networking/networking.go tests
+		stdout, stderr, err := e2epod.ExecCommandInContainerWithFullOutput(f, podName, os+"-container", cmd...)
+		if err != nil {
+			framework.Logf("Encountered error while running command: %v.\nStdout: %s\nStderr: %s\nErr: %v", cmd, stdout, stderr, err)
+		}
 		return err
-	}, duration, pollInterval).ShouldNot(gomega.HaveOccurred())
+	}
+	gomega.Eventually(ctx, connChecker, duration, pollInterval).ShouldNot(gomega.HaveOccurred())
+	gomega.Consistently(ctx, connChecker, duration, pollInterval).ShouldNot(gomega.HaveOccurred())
 }
 
 func linuxCheck(address string, port int) []string {
-	nc := fmt.Sprintf("nc -vz %s %v -w %v", address, port, timeout)
+	nc := fmt.Sprintf("nc -vz %s %v -w %v", address, port, timeoutSeconds)
 	cmd := []string{"/bin/sh", "-c", nc}
 	return cmd
 }
 
 func windowsCheck(address string) []string {
-	curl := fmt.Sprintf("curl.exe %s --connect-timeout %v --fail", address, timeout)
+	curl := fmt.Sprintf("curl.exe %s --connect-timeout %v --fail", address, timeoutSeconds)
 	cmd := []string{"cmd", "/c", curl}
 	return cmd
 }
@@ -117,7 +153,7 @@ func createTestPod(f *framework.Framework, image string, os string) *v1.Pod {
 				},
 			},
 			NodeSelector: map[string]string{
-				"beta.kubernetes.io/os": os,
+				"kubernetes.io/os": os,
 			},
 		},
 	}
@@ -129,5 +165,5 @@ func createTestPod(f *framework.Framework, image string, os string) *v1.Pod {
 			},
 		}
 	}
-	return f.PodClient().CreateSync(pod)
+	return pod
 }

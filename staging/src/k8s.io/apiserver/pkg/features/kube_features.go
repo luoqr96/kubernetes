@@ -28,23 +28,55 @@ const (
 	//
 	// // owner: @username
 	// // alpha: v1.4
-	// MyFeature() bool
-
-	// owner: @tallclair
-	// alpha: v1.5
-	// beta: v1.6
+	// MyFeature featuregate.Feature = "MyFeature"
 	//
-	// StreamingProxyRedirects controls whether the apiserver should intercept (and follow)
-	// redirects from the backend (Kubelet) for streaming requests (exec/attach/port-forward).
-	StreamingProxyRedirects featuregate.Feature = "StreamingProxyRedirects"
+	// Feature gates should be listed in alphabetical, case-sensitive
+	// (upper before any lower case character) order. This reduces the risk
+	// of code conflicts because changes are more likely to be scattered
+	// across the file.
 
-	// owner: @tallclair
-	// alpha: v1.10
-	// beta: v1.14
+	// owner: @jefftree @alexzielenski
+	// alpha: v1.26
 	//
-	// ValidateProxyRedirects controls whether the apiserver should validate that redirects are only
-	// followed to the same host. Only used if StreamingProxyRedirects is enabled.
-	ValidateProxyRedirects featuregate.Feature = "ValidateProxyRedirects"
+	// Enables an single HTTP endpoint /discovery/<version> which supports native HTTP
+	// caching with ETags containing all APIResources known to the apiserver.
+	AggregatedDiscoveryEndpoint featuregate.Feature = "AggregatedDiscoveryEndpoint"
+
+	// owner: @smarterclayton
+	// alpha: v1.8
+	// beta: v1.9
+	//
+	// Allow API clients to retrieve resource lists in chunks rather than
+	// all at once.
+	APIListChunking featuregate.Feature = "APIListChunking"
+
+	// owner: @MikeSpreitzer @yue9944882
+	// alpha: v1.18
+	// beta: v1.20
+	//
+	// Enables managing request concurrency with prioritization and fairness at each server.
+	// The FeatureGate was introduced in release 1.15 but the feature
+	// was not really implemented before 1.18.
+	APIPriorityAndFairness featuregate.Feature = "APIPriorityAndFairness"
+
+	// owner: @ilackams
+	// alpha: v1.7
+	// beta: v1.16
+	//
+	// Enables compression of REST responses (GET and LIST only)
+	APIResponseCompression featuregate.Feature = "APIResponseCompression"
+
+	// owner: @roycaihw
+	// alpha: v1.20
+	//
+	// Assigns each kube-apiserver an ID in a cluster.
+	APIServerIdentity featuregate.Feature = "APIServerIdentity"
+
+	// owner: @dashpole
+	// alpha: v1.22
+	//
+	// Add support for distributed tracing in the API Server
+	APIServerTracing featuregate.Feature = "APIServerTracing"
 
 	// owner: @tallclair
 	// alpha: v1.7
@@ -56,49 +88,100 @@ const (
 	// audited.
 	AdvancedAuditing featuregate.Feature = "AdvancedAuditing"
 
-	// owner: @pbarker
-	// alpha: v1.13
+	// owner: @cici37 @jpbetz
+	// kep: http://kep.k8s.io/3488
+	// alpha: v1.26
 	//
-	// DynamicAuditing enables configuration of audit policy and webhook backends through an
-	// AuditSink API object.
-	DynamicAuditing featuregate.Feature = "DynamicAuditing"
+	// Enables expression validation in Admission Control
+	ValidatingAdmissionPolicy featuregate.Feature = "ValidatingAdmissionPolicy"
 
-	// owner: @ilackams
-	// alpha: v1.7
+	// owner: @cici37
+	// kep: https://kep.k8s.io/2876
+	// alpha: v1.23
+	// beta: v1.25
 	//
-	// Enables compression of REST responses (GET and LIST only)
-	APIResponseCompression featuregate.Feature = "APIResponseCompression"
-
-	// owner: @smarterclayton
-	// alpha: v1.8
-	// beta: v1.9
-	//
-	// Allow API clients to retrieve resource lists in chunks rather than
-	// all at once.
-	APIListChunking featuregate.Feature = "APIListChunking"
+	// Enables expression validation for Custom Resource
+	CustomResourceValidationExpressions featuregate.Feature = "CustomResourceValidationExpressions"
 
 	// owner: @apelisse
 	// alpha: v1.12
 	// beta: v1.13
+	// stable: v1.18
 	//
 	// Allow requests to be processed but not stored, so that
 	// validation, merging, mutation can be tested without
 	// committing.
 	DryRun featuregate.Feature = "DryRun"
 
+	// owner: @wojtek-t
+	// alpha: v1.20
+	// beta: v1.21
+	// GA: v1.24
+	//
+	// Allows for updating watchcache resource version with progress notify events.
+	EfficientWatchResumption featuregate.Feature = "EfficientWatchResumption"
+
+	// owner: @aramase
+	// kep: https://kep.k8s.io/3299
+	// alpha: v1.25
+	//
+	// Enables KMS v2 API for encryption at rest.
+	KMSv2 featuregate.Feature = "KMSv2"
+
+	// owner: @jiahuif
+	// kep: https://kep.k8s.io/2887
+	// alpha: v1.23
+	// beta: v1.24
+	//
+	// Enables populating "enum" field of OpenAPI schemas
+	// in the spec returned from kube-apiserver.
+	OpenAPIEnums featuregate.Feature = "OpenAPIEnums"
+
+	// owner: @jefftree
+	// kep: https://kep.k8s.io/2896
+	// alpha: v1.23
+	// beta: v1.24
+	//
+	// Enables kubernetes to publish OpenAPI v3
+	OpenAPIV3 featuregate.Feature = "OpenAPIV3"
+
 	// owner: @caesarxuchao
 	// alpha: v1.15
+	// beta: v1.16
 	//
 	// Allow apiservers to show a count of remaining items in the response
 	// to a chunking list request.
 	RemainingItemCount featuregate.Feature = "RemainingItemCount"
 
+	// owner: @wojtek-t
+	// alpha: v1.16
+	// beta: v1.20
+	// GA: v1.24
+	//
+	// Deprecates and removes SelfLink from ObjectMeta and ListMeta.
+	RemoveSelfLink featuregate.Feature = "RemoveSelfLink"
+
 	// owner: @apelisse, @lavalamp
 	// alpha: v1.14
 	// beta: v1.16
+	// stable: v1.22
 	//
 	// Server-side apply. Merging happens on the server.
 	ServerSideApply featuregate.Feature = "ServerSideApply"
+
+	// owner: @kevindelgado
+	// kep: https://kep.k8s.io/2885
+	// alpha: v1.23
+	// beta: v1.24
+	//
+	// Enables server-side field validation.
+	ServerSideFieldValidation featuregate.Feature = "ServerSideFieldValidation"
+
+	// owner: @caesarxuchao @roycaihw
+	// alpha: v1.20
+	//
+	// Enable the storage version API.
+	StorageVersionAPI featuregate.Feature = "StorageVersionAPI"
 
 	// owner: @caesarxuchao
 	// alpha: v1.14
@@ -108,18 +191,6 @@ const (
 	// document.
 	StorageVersionHash featuregate.Feature = "StorageVersionHash"
 
-	// owner: @ksubrmnn
-	// alpha: v1.14
-	//
-	// Allows kube-proxy to run in Overlay mode for Windows
-	WinOverlay featuregate.Feature = "WinOverlay"
-
-	// owner: @ksubrmnn
-	// alpha: v1.14
-	//
-	// Allows kube-proxy to create DSR loadbalancers for Windows
-	WinDSR featuregate.Feature = "WinDSR"
-
 	// owner: @wojtek-t
 	// alpha: v1.15
 	// beta: v1.16
@@ -127,19 +198,6 @@ const (
 	//
 	// Enables support for watch bookmark events.
 	WatchBookmark featuregate.Feature = "WatchBookmark"
-
-	// owner: @MikeSpreitzer @yue9944882
-	// alpha: v1.15
-	//
-	//
-	// Enables managing request concurrency with prioritization and fairness at each server
-	APIPriorityAndFairness featuregate.Feature = "APIPriorityAndFairness"
-
-	// owner: @wojtek-t
-	// alpha: v1.16
-	//
-	// Deprecates and removes SelfLink from ObjectMeta and ListMeta.
-	RemoveSelfLink featuregate.Feature = "RemoveSelfLink"
 )
 
 func init() {
@@ -150,19 +208,45 @@ func init() {
 // To add a new feature, define a key for it above and add it here. The features will be
 // available throughout Kubernetes binaries.
 var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-	StreamingProxyRedirects: {Default: true, PreRelease: featuregate.Beta},
-	ValidateProxyRedirects:  {Default: true, PreRelease: featuregate.Beta},
-	AdvancedAuditing:        {Default: true, PreRelease: featuregate.GA},
-	DynamicAuditing:         {Default: false, PreRelease: featuregate.Alpha},
-	APIResponseCompression:  {Default: true, PreRelease: featuregate.Beta},
-	APIListChunking:         {Default: true, PreRelease: featuregate.Beta},
-	DryRun:                  {Default: true, PreRelease: featuregate.Beta},
-	RemainingItemCount:      {Default: true, PreRelease: featuregate.Beta},
-	ServerSideApply:         {Default: true, PreRelease: featuregate.Beta},
-	StorageVersionHash:      {Default: true, PreRelease: featuregate.Beta},
-	WinOverlay:              {Default: false, PreRelease: featuregate.Alpha},
-	WinDSR:                  {Default: false, PreRelease: featuregate.Alpha},
-	WatchBookmark:           {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
-	APIPriorityAndFairness:  {Default: false, PreRelease: featuregate.Alpha},
-	RemoveSelfLink:          {Default: false, PreRelease: featuregate.Alpha},
+	AggregatedDiscoveryEndpoint: {Default: false, PreRelease: featuregate.Alpha},
+
+	APIListChunking: {Default: true, PreRelease: featuregate.Beta},
+
+	APIPriorityAndFairness: {Default: true, PreRelease: featuregate.Beta},
+
+	APIResponseCompression: {Default: true, PreRelease: featuregate.Beta},
+
+	APIServerIdentity: {Default: true, PreRelease: featuregate.Beta},
+
+	APIServerTracing: {Default: false, PreRelease: featuregate.Alpha},
+
+	AdvancedAuditing: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.28
+
+	ValidatingAdmissionPolicy: {Default: false, PreRelease: featuregate.Alpha},
+
+	CustomResourceValidationExpressions: {Default: true, PreRelease: featuregate.Beta},
+
+	DryRun: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.28
+
+	EfficientWatchResumption: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+
+	KMSv2: {Default: false, PreRelease: featuregate.Alpha},
+
+	OpenAPIEnums: {Default: true, PreRelease: featuregate.Beta},
+
+	OpenAPIV3: {Default: true, PreRelease: featuregate.Beta},
+
+	RemainingItemCount: {Default: true, PreRelease: featuregate.Beta},
+
+	RemoveSelfLink: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+
+	ServerSideApply: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+
+	ServerSideFieldValidation: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+
+	StorageVersionAPI: {Default: false, PreRelease: featuregate.Alpha},
+
+	StorageVersionHash: {Default: true, PreRelease: featuregate.Beta},
+
+	WatchBookmark: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 }

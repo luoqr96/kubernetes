@@ -17,6 +17,7 @@ limitations under the License.
 package fake
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -40,6 +41,11 @@ type MetadataClient interface {
 	UpdateFake(obj *metav1.PartialObjectMetadata, opts metav1.UpdateOptions, subresources ...string) (*metav1.PartialObjectMetadata, error)
 }
 
+// NewTestScheme creates a unique Scheme for each test.
+func NewTestScheme() *runtime.Scheme {
+	return runtime.NewScheme()
+}
+
 // NewSimpleMetadataClient creates a new client that will use the provided scheme and respond with the
 // provided objects when requests are made. It will track actions made to the client which can be checked
 // with GetActions().
@@ -59,7 +65,7 @@ func NewSimpleMetadataClient(scheme *runtime.Scheme, objects ...runtime.Object) 
 		}
 	}
 
-	cs := &FakeMetadataClient{scheme: scheme}
+	cs := &FakeMetadataClient{scheme: scheme, tracker: o}
 	cs.AddReactor("*", "*", testing.ObjectReaction(o))
 	cs.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
 		gvr := action.GetResource()
@@ -79,7 +85,8 @@ func NewSimpleMetadataClient(scheme *runtime.Scheme, objects ...runtime.Object) 
 // you want to test easier.
 type FakeMetadataClient struct {
 	testing.Fake
-	scheme *runtime.Scheme
+	scheme  *runtime.Scheme
+	tracker testing.ObjectTracker
 }
 
 type metadataResourceClient struct {
@@ -88,7 +95,14 @@ type metadataResourceClient struct {
 	resource  schema.GroupVersionResource
 }
 
-var _ metadata.Interface = &FakeMetadataClient{}
+var (
+	_ metadata.Interface = &FakeMetadataClient{}
+	_ testing.FakeClient = &FakeMetadataClient{}
+)
+
+func (c *FakeMetadataClient) Tracker() testing.ObjectTracker {
+	return c.tracker
+}
 
 // Resource returns an interface for accessing the provided resource.
 func (c *FakeMetadataClient) Resource(resource schema.GroupVersionResource) metadata.Getter {
@@ -113,7 +127,8 @@ func (c *metadataResourceClient) CreateFake(obj *metav1.PartialObjectMetadata, o
 			Invokes(testing.NewRootCreateAction(c.resource, obj), obj)
 
 	case len(c.namespace) == 0 && len(subresources) > 0:
-		accessor, err := meta.Accessor(obj)
+		var accessor metav1.Object // avoid shadowing err
+		accessor, err = meta.Accessor(obj)
 		if err != nil {
 			return nil, err
 		}
@@ -126,7 +141,8 @@ func (c *metadataResourceClient) CreateFake(obj *metav1.PartialObjectMetadata, o
 			Invokes(testing.NewCreateAction(c.resource, c.namespace, obj), obj)
 
 	case len(c.namespace) > 0 && len(subresources) > 0:
-		accessor, err := meta.Accessor(obj)
+		var accessor metav1.Object // avoid shadowing err
+		accessor, err = meta.Accessor(obj)
 		if err != nil {
 			return nil, err
 		}
@@ -214,7 +230,7 @@ func (c *metadataResourceClient) UpdateStatus(obj *metav1.PartialObjectMetadata,
 }
 
 // Delete records the object deletion and processes it via the reactor.
-func (c *metadataResourceClient) Delete(name string, opts *metav1.DeleteOptions, subresources ...string) error {
+func (c *metadataResourceClient) Delete(ctx context.Context, name string, opts metav1.DeleteOptions, subresources ...string) error {
 	var err error
 	switch {
 	case len(c.namespace) == 0 && len(subresources) == 0:
@@ -238,7 +254,7 @@ func (c *metadataResourceClient) Delete(name string, opts *metav1.DeleteOptions,
 }
 
 // DeleteCollection records the object collection deletion and processes it via the reactor.
-func (c *metadataResourceClient) DeleteCollection(opts *metav1.DeleteOptions, listOptions metav1.ListOptions) error {
+func (c *metadataResourceClient) DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOptions metav1.ListOptions) error {
 	var err error
 	switch {
 	case len(c.namespace) == 0:
@@ -255,7 +271,7 @@ func (c *metadataResourceClient) DeleteCollection(opts *metav1.DeleteOptions, li
 }
 
 // Get records the object retrieval and processes it via the reactor.
-func (c *metadataResourceClient) Get(name string, opts metav1.GetOptions, subresources ...string) (*metav1.PartialObjectMetadata, error) {
+func (c *metadataResourceClient) Get(ctx context.Context, name string, opts metav1.GetOptions, subresources ...string) (*metav1.PartialObjectMetadata, error) {
 	var uncastRet runtime.Object
 	var err error
 	switch {
@@ -290,7 +306,7 @@ func (c *metadataResourceClient) Get(name string, opts metav1.GetOptions, subres
 }
 
 // List records the object deletion and processes it via the reactor.
-func (c *metadataResourceClient) List(opts metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
+func (c *metadataResourceClient) List(ctx context.Context, opts metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
 	var obj runtime.Object
 	var err error
 	switch {
@@ -337,7 +353,7 @@ func (c *metadataResourceClient) List(opts metav1.ListOptions) (*metav1.PartialO
 	return list, nil
 }
 
-func (c *metadataResourceClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+func (c *metadataResourceClient) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
 	switch {
 	case len(c.namespace) == 0:
 		return c.client.Fake.
@@ -353,7 +369,7 @@ func (c *metadataResourceClient) Watch(opts metav1.ListOptions) (watch.Interface
 }
 
 // Patch records the object patch and processes it via the reactor.
-func (c *metadataResourceClient) Patch(name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (*metav1.PartialObjectMetadata, error) {
+func (c *metadataResourceClient) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (*metav1.PartialObjectMetadata, error) {
 	var uncastRet runtime.Object
 	var err error
 	switch {

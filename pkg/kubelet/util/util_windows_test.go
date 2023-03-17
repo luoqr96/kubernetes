@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -19,10 +20,13 @@ limitations under the License.
 package util
 
 import (
-	"io/ioutil"
+	"fmt"
 	"math/rand"
 	"net"
 	"os"
+	"reflect"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,17 +35,98 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGetAddressAndDialer(t *testing.T) {
+
+	// Compare dialer function by pointer
+	tcpDialPointer := reflect.ValueOf(tcpDial).Pointer()
+	npipeDialPointer := reflect.ValueOf(npipeDial).Pointer()
+	var nilDialPointer uintptr = 0x0
+
+	tests := []struct {
+		endpoint      string
+		expectedAddr  string
+		expectedDial  uintptr
+		expectedError bool
+	}{
+		{
+			endpoint:      "tcp://localhost:15880",
+			expectedAddr:  "localhost:15880",
+			expectedDial:  tcpDialPointer,
+			expectedError: false,
+		},
+		{
+			endpoint:      "npipe://./pipe/mypipe",
+			expectedAddr:  "//./pipe/mypipe",
+			expectedDial:  npipeDialPointer,
+			expectedError: false,
+		},
+		{
+			endpoint:      "npipe:\\\\.\\pipe\\mypipe",
+			expectedAddr:  "//./pipe/mypipe",
+			expectedDial:  npipeDialPointer,
+			expectedError: false,
+		},
+		{
+			endpoint:      "unix:///tmp/s1.sock",
+			expectedAddr:  "",
+			expectedDial:  nilDialPointer,
+			expectedError: true,
+		},
+		{
+			endpoint:      "tcp1://abc",
+			expectedAddr:  "",
+			expectedDial:  nilDialPointer,
+			expectedError: true,
+		},
+		{
+			endpoint:      "a b c",
+			expectedAddr:  "",
+			expectedDial:  nilDialPointer,
+			expectedError: true,
+		},
+	}
+
+	for _, test := range tests {
+		expectedDialerName := runtime.FuncForPC(test.expectedDial).Name()
+		if expectedDialerName == "" {
+			expectedDialerName = "nilDial"
+		}
+		t.Run(fmt.Sprintf("Endpoint is %s, addr is %s and dialer is %s",
+			test.endpoint, test.expectedAddr, expectedDialerName),
+			func(t *testing.T) {
+				address, dialer, err := GetAddressAndDialer(test.endpoint)
+
+				dialerPointer := reflect.ValueOf(dialer).Pointer()
+				actualDialerName := runtime.FuncForPC(dialerPointer).Name()
+				if actualDialerName == "" {
+					actualDialerName = "nilDial"
+				}
+
+				assert.Equalf(t, test.expectedDial, dialerPointer,
+					"Expected dialer %s, but get %s", expectedDialerName, actualDialerName)
+
+				assert.Equal(t, test.expectedAddr, address)
+
+				if test.expectedError {
+					assert.NotNil(t, err, "Expect error during parsing %q", test.endpoint)
+				} else {
+					assert.Nil(t, err, "Expect no error during parsing %q", test.endpoint)
+				}
+			})
+	}
+}
+
 func TestParseEndpoint(t *testing.T) {
 	tests := []struct {
 		endpoint         string
-		expectError      bool
+		expectedError    bool
 		expectedProtocol string
 		expectedAddr     string
 	}{
 		{
 			endpoint:         "unix:///tmp/s1.sock",
 			expectedProtocol: "unix",
-			expectError:      true,
+			expectedError:    true,
 		},
 		{
 			endpoint:         "tcp://localhost:15880",
@@ -76,18 +161,18 @@ func TestParseEndpoint(t *testing.T) {
 		{
 			endpoint:         "tcp1://abc",
 			expectedProtocol: "tcp1",
-			expectError:      true,
+			expectedError:    true,
 		},
 		{
-			endpoint:    "a b c",
-			expectError: true,
+			endpoint:      "a b c",
+			expectedError: true,
 		},
 	}
 
 	for _, test := range tests {
 		protocol, addr, err := parseEndpoint(test.endpoint)
 		assert.Equal(t, test.expectedProtocol, protocol)
-		if test.expectError {
+		if test.expectedError {
 			assert.NotNil(t, err, "Expect error during parsing %q", test.endpoint)
 			continue
 		}
@@ -98,10 +183,10 @@ func TestParseEndpoint(t *testing.T) {
 }
 
 func testPipe(t *testing.T, label string) {
-	generatePipeName := func(suffixlen int) string {
+	generatePipeName := func(suffixLen int) string {
 		rand.Seed(time.Now().UnixNano())
 		letter := []rune("abcdef0123456789")
-		b := make([]rune, suffixlen)
+		b := make([]rune, suffixLen)
 		for i := range b {
 			b[i] = letter[rand.Intn(len(letter))]
 		}
@@ -118,7 +203,7 @@ func testPipe(t *testing.T, label string) {
 }
 
 func testRegularFile(t *testing.T, label string, exists bool) {
-	f, err := ioutil.TempFile("", "test-file")
+	f, err := os.CreateTemp("", "test-file")
 	require.NoErrorf(t, err, "Failed to create file for test purposes: %v while setting up: %s", err, label)
 	testFile := f.Name()
 	if !exists {
@@ -132,7 +217,7 @@ func testRegularFile(t *testing.T, label string, exists bool) {
 }
 
 func testUnixDomainSocket(t *testing.T, label string) {
-	f, err := ioutil.TempFile("", "test-domain-socket")
+	f, err := os.CreateTemp("", "test-domain-socket")
 	require.NoErrorf(t, err, "Failed to create file for test purposes: %v while setting up: %s", err, label)
 	testFile := f.Name()
 	f.Close()
@@ -147,11 +232,50 @@ func testUnixDomainSocket(t *testing.T, label string) {
 	assert.True(t, result, "Unexpected result: false from IsUnixDomainSocket: %v for %s", result, label)
 }
 
+// This is required as on Windows it's possible for the socket file backing a Unix domain socket to
+// exist but not be ready for socket communications yet as per
+// https://github.com/kubernetes/kubernetes/issues/104584
+func testPendingUnixDomainSocket(t *testing.T, label string) {
+	// Create a temporary file that will simulate the Unix domain socket file in a
+	// not-yet-ready state. We need this because the Kubelet keeps an eye on file
+	// changes and acts on them, leading to potential race issues as described in
+	// the referenced issue above
+	f, err := os.CreateTemp("", "test-domain-socket")
+	require.NoErrorf(t, err, "Failed to create file for test purposes: %v while setting up: %s", err, label)
+	testFile := f.Name()
+	f.Close()
+
+	// Start the check at this point
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		result, err := IsUnixDomainSocket(testFile)
+		assert.Nil(t, err, "Unexpected error: %v from IsUnixDomainSocket for %s", err, label)
+		assert.True(t, result, "Unexpected result: false from IsUnixDomainSocket: %v for %s", result, label)
+		wg.Done()
+	}()
+
+	// Wait a sufficient amount of time to make sure the retry logic kicks in
+	time.Sleep(socketDialRetryPeriod)
+
+	// Replace the temporary file with an actual Unix domain socket file
+	os.Remove(testFile)
+	ta, err := net.ResolveUnixAddr("unix", testFile)
+	require.NoErrorf(t, err, "Failed to ResolveUnixAddr: %v while setting up: %s", err, label)
+	unixln, err := net.ListenUnix("unix", ta)
+	require.NoErrorf(t, err, "Failed to ListenUnix: %v while setting up: %s", err, label)
+
+	// Wait for the goroutine to finish, then close the socket
+	wg.Wait()
+	unixln.Close()
+}
+
 func TestIsUnixDomainSocket(t *testing.T) {
 	testPipe(t, "Named Pipe")
 	testRegularFile(t, "Regular File that Exists", true)
 	testRegularFile(t, "Regular File that Does Not Exist", false)
 	testUnixDomainSocket(t, "Unix Domain Socket File")
+	testPendingUnixDomainSocket(t, "Pending Unix Domain Socket File")
 }
 
 func TestNormalizePath(t *testing.T) {

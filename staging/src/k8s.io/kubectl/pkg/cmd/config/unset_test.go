@@ -18,7 +18,6 @@ package config
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -106,7 +105,7 @@ func TestUnsetUnexistConfig(t *testing.T) {
 }
 
 func (test unsetConfigTest) run(t *testing.T) {
-	fakeKubeFile, err := ioutil.TempFile(os.TempDir(), "")
+	fakeKubeFile, err := os.CreateTemp(os.TempDir(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,6 +123,9 @@ func (test unsetConfigTest) run(t *testing.T) {
 	err = opts.complete(cmd, test.args)
 	if err == nil {
 		err = opts.run(buf)
+	}
+	if test.expectedErr == "" && err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	config, err := clientcmd.LoadFromFile(fakeKubeFile.Name())
 	if err != nil {

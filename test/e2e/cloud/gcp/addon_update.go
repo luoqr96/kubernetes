@@ -18,6 +18,7 @@ package gcp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -30,12 +31,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enetwork "k8s.io/kubernetes/test/e2e/framework/network"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
-	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 )
 
 // TODO: it would probably be slightly better to build up the objects
@@ -216,6 +218,7 @@ var _ = SIGDescribe("Addon update", func() {
 	var dir string
 	var sshClient *ssh.Client
 	f := framework.NewDefaultFramework("addon-update-test")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		// This test requires:
@@ -238,7 +241,7 @@ var _ = SIGDescribe("Addon update", func() {
 	})
 
 	// WARNING: the test is not parallel-friendly!
-	ginkgo.It("should propagate add-on file changes [Slow]", func() {
+	ginkgo.It("should propagate add-on file changes [Slow]", func(ctx context.Context) {
 		// This test requires:
 		// - SSH
 		// - master access
@@ -301,13 +304,13 @@ var _ = SIGDescribe("Addon update", func() {
 		// Delete the "ensure exist class" addon at the end.
 		defer func() {
 			framework.Logf("Cleaning up ensure exist class addon.")
-			err := f.ClientSet.CoreV1().Services(addonNsName).Delete("addon-ensure-exists-test", nil)
+			err := f.ClientSet.CoreV1().Services(addonNsName).Delete(ctx, "addon-ensure-exists-test", metav1.DeleteOptions{})
 			framework.ExpectNoError(err)
 		}()
 
-		waitForReplicationControllerInAddonTest(f.ClientSet, addonNsName, "addon-reconcile-test", true)
-		waitForServiceInAddonTest(f.ClientSet, addonNsName, "addon-deprecated-label-test", true)
-		waitForServiceInAddonTest(f.ClientSet, addonNsName, "addon-ensure-exists-test", true)
+		waitForReplicationControllerInAddonTest(ctx, f.ClientSet, addonNsName, "addon-reconcile-test", true)
+		waitForServiceInAddonTest(ctx, f.ClientSet, addonNsName, "addon-deprecated-label-test", true)
+		waitForServiceInAddonTest(ctx, f.ClientSet, addonNsName, "addon-ensure-exists-test", true)
 
 		// Replace the manifests with new contents.
 		ginkgo.By("update manifests")
@@ -317,52 +320,52 @@ var _ = SIGDescribe("Addon update", func() {
 
 		// Wait for updated addons to have the new added label.
 		reconcileSelector := labels.SelectorFromSet(labels.Set(map[string]string{"newLabel": "addon-reconcile-test"}))
-		waitForReplicationControllerwithSelectorInAddonTest(f.ClientSet, addonNsName, true, reconcileSelector)
+		waitForReplicationControllerwithSelectorInAddonTest(ctx, f.ClientSet, addonNsName, true, reconcileSelector)
 		deprecatedLabelSelector := labels.SelectorFromSet(labels.Set(map[string]string{"newLabel": "addon-deprecated-label-test"}))
-		waitForServicewithSelectorInAddonTest(f.ClientSet, addonNsName, true, deprecatedLabelSelector)
+		waitForServicewithSelectorInAddonTest(ctx, f.ClientSet, addonNsName, true, deprecatedLabelSelector)
 		// "Ensure exist class" addon should not be updated.
 		ensureExistSelector := labels.SelectorFromSet(labels.Set(map[string]string{"newLabel": "addon-ensure-exists-test"}))
-		waitForServicewithSelectorInAddonTest(f.ClientSet, addonNsName, false, ensureExistSelector)
+		waitForServicewithSelectorInAddonTest(ctx, f.ClientSet, addonNsName, false, ensureExistSelector)
 
 		ginkgo.By("remove manifests")
 		sshExecAndVerify(sshClient, fmt.Sprintf("sudo rm %s/%s", destinationDir, rcAddonReconcile))
 		sshExecAndVerify(sshClient, fmt.Sprintf("sudo rm %s/%s", destinationDir, svcAddonDeprecatedLabel))
 		sshExecAndVerify(sshClient, fmt.Sprintf("sudo rm %s/%s", destinationDir, svcAddonEnsureExists))
 
-		waitForReplicationControllerInAddonTest(f.ClientSet, addonNsName, "addon-reconcile-test", false)
-		waitForServiceInAddonTest(f.ClientSet, addonNsName, "addon-deprecated-label-test", false)
+		waitForReplicationControllerInAddonTest(ctx, f.ClientSet, addonNsName, "addon-reconcile-test", false)
+		waitForServiceInAddonTest(ctx, f.ClientSet, addonNsName, "addon-deprecated-label-test", false)
 		// "Ensure exist class" addon will not be deleted when manifest is removed.
-		waitForServiceInAddonTest(f.ClientSet, addonNsName, "addon-ensure-exists-test", true)
+		waitForServiceInAddonTest(ctx, f.ClientSet, addonNsName, "addon-ensure-exists-test", true)
 
 		ginkgo.By("verify invalid addons weren't created")
-		_, err = f.ClientSet.CoreV1().ReplicationControllers(addonNsName).Get("invalid-addon-test", metav1.GetOptions{})
+		_, err = f.ClientSet.CoreV1().ReplicationControllers(addonNsName).Get(ctx, "invalid-addon-test", metav1.GetOptions{})
 		framework.ExpectError(err)
 
 		// Invalid addon manifests and the "ensure exist class" addon will be deleted by the deferred function.
 	})
 })
 
-func waitForServiceInAddonTest(c clientset.Interface, addonNamespace, name string, exist bool) {
-	framework.ExpectNoError(framework.WaitForService(c, addonNamespace, name, exist, addonTestPollInterval, addonTestPollTimeout))
+func waitForServiceInAddonTest(ctx context.Context, c clientset.Interface, addonNamespace, name string, exist bool) {
+	framework.ExpectNoError(e2enetwork.WaitForService(ctx, c, addonNamespace, name, exist, addonTestPollInterval, addonTestPollTimeout))
 }
 
-func waitForReplicationControllerInAddonTest(c clientset.Interface, addonNamespace, name string, exist bool) {
-	framework.ExpectNoError(waitForReplicationController(c, addonNamespace, name, exist, addonTestPollInterval, addonTestPollTimeout))
+func waitForReplicationControllerInAddonTest(ctx context.Context, c clientset.Interface, addonNamespace, name string, exist bool) {
+	framework.ExpectNoError(waitForReplicationController(ctx, c, addonNamespace, name, exist, addonTestPollInterval, addonTestPollTimeout))
 }
 
-func waitForServicewithSelectorInAddonTest(c clientset.Interface, addonNamespace string, exist bool, selector labels.Selector) {
-	framework.ExpectNoError(waitForServiceWithSelector(c, addonNamespace, selector, exist, addonTestPollInterval, addonTestPollTimeout))
+func waitForServicewithSelectorInAddonTest(ctx context.Context, c clientset.Interface, addonNamespace string, exist bool, selector labels.Selector) {
+	framework.ExpectNoError(waitForServiceWithSelector(ctx, c, addonNamespace, selector, exist, addonTestPollInterval, addonTestPollTimeout))
 }
 
-func waitForReplicationControllerwithSelectorInAddonTest(c clientset.Interface, addonNamespace string, exist bool, selector labels.Selector) {
-	framework.ExpectNoError(waitForReplicationControllerWithSelector(c, addonNamespace, selector, exist, addonTestPollInterval,
+func waitForReplicationControllerwithSelectorInAddonTest(ctx context.Context, c clientset.Interface, addonNamespace string, exist bool, selector labels.Selector) {
+	framework.ExpectNoError(waitForReplicationControllerWithSelector(ctx, c, addonNamespace, selector, exist, addonTestPollInterval,
 		addonTestPollTimeout))
 }
 
 // waitForReplicationController waits until the RC appears (exist == true), or disappears (exist == false)
-func waitForReplicationController(c clientset.Interface, namespace, name string, exist bool, interval, timeout time.Duration) error {
-	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		_, err := c.CoreV1().ReplicationControllers(namespace).Get(name, metav1.GetOptions{})
+func waitForReplicationController(ctx context.Context, c clientset.Interface, namespace, name string, exist bool, interval, timeout time.Duration) error {
+	err := wait.PollImmediateWithContext(ctx, interval, timeout, func(ctx context.Context) (bool, error) {
+		_, err := c.CoreV1().ReplicationControllers(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			framework.Logf("Get ReplicationController %s in namespace %s failed (%v).", name, namespace, err)
 			return !exist, nil
@@ -372,16 +375,16 @@ func waitForReplicationController(c clientset.Interface, namespace, name string,
 	})
 	if err != nil {
 		stateMsg := map[bool]string{true: "to appear", false: "to disappear"}
-		return fmt.Errorf("error waiting for ReplicationController %s/%s %s: %v", namespace, name, stateMsg[exist], err)
+		return fmt.Errorf("error waiting for ReplicationController %s/%s %s: %w", namespace, name, stateMsg[exist], err)
 	}
 	return nil
 }
 
 // waitForServiceWithSelector waits until any service with given selector appears (exist == true), or disappears (exist == false)
-func waitForServiceWithSelector(c clientset.Interface, namespace string, selector labels.Selector, exist bool, interval,
+func waitForServiceWithSelector(ctx context.Context, c clientset.Interface, namespace string, selector labels.Selector, exist bool, interval,
 	timeout time.Duration) error {
-	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		services, err := c.CoreV1().Services(namespace).List(metav1.ListOptions{LabelSelector: selector.String()})
+	err := wait.PollImmediateWithContext(ctx, interval, timeout, func(ctx context.Context) (bool, error) {
+		services, err := c.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 		switch {
 		case len(services.Items) != 0:
 			framework.Logf("Service with %s in namespace %s found.", selector.String(), namespace)
@@ -389,7 +392,7 @@ func waitForServiceWithSelector(c clientset.Interface, namespace string, selecto
 		case len(services.Items) == 0:
 			framework.Logf("Service with %s in namespace %s disappeared.", selector.String(), namespace)
 			return !exist, nil
-		case !testutils.IsRetryableAPIError(err):
+		case err != nil:
 			framework.Logf("Non-retryable failure while listing service.")
 			return false, err
 		default:
@@ -399,16 +402,16 @@ func waitForServiceWithSelector(c clientset.Interface, namespace string, selecto
 	})
 	if err != nil {
 		stateMsg := map[bool]string{true: "to appear", false: "to disappear"}
-		return fmt.Errorf("error waiting for service with %s in namespace %s %s: %v", selector.String(), namespace, stateMsg[exist], err)
+		return fmt.Errorf("error waiting for service with %s in namespace %s %s: %w", selector.String(), namespace, stateMsg[exist], err)
 	}
 	return nil
 }
 
 // waitForReplicationControllerWithSelector waits until any RC with given selector appears (exist == true), or disappears (exist == false)
-func waitForReplicationControllerWithSelector(c clientset.Interface, namespace string, selector labels.Selector, exist bool, interval,
+func waitForReplicationControllerWithSelector(ctx context.Context, c clientset.Interface, namespace string, selector labels.Selector, exist bool, interval,
 	timeout time.Duration) error {
-	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		rcs, err := c.CoreV1().ReplicationControllers(namespace).List(metav1.ListOptions{LabelSelector: selector.String()})
+	err := wait.PollImmediateWithContext(ctx, interval, timeout, func(ctx context.Context) (bool, error) {
+		rcs, err := c.CoreV1().ReplicationControllers(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 		switch {
 		case len(rcs.Items) != 0:
 			framework.Logf("ReplicationController with %s in namespace %s found.", selector.String(), namespace)
@@ -423,7 +426,7 @@ func waitForReplicationControllerWithSelector(c clientset.Interface, namespace s
 	})
 	if err != nil {
 		stateMsg := map[bool]string{true: "to appear", false: "to disappear"}
-		return fmt.Errorf("error waiting for ReplicationControllers with %s in namespace %s %s: %v", selector.String(), namespace, stateMsg[exist], err)
+		return fmt.Errorf("error waiting for ReplicationControllers with %s in namespace %s %s: %w", selector.String(), namespace, stateMsg[exist], err)
 	}
 	return nil
 }
@@ -434,7 +437,7 @@ func getMasterSSHClient() (*ssh.Client, error) {
 	// Get a signer for the provider.
 	signer, err := e2essh.GetSigner(framework.TestContext.Provider)
 	if err != nil {
-		return nil, fmt.Errorf("error getting signer for provider %s: '%v'", framework.TestContext.Provider, err)
+		return nil, fmt.Errorf("error getting signer for provider %s: %w", framework.TestContext.Provider, err)
 	}
 
 	sshUser := os.Getenv("KUBE_SSH_USER")
@@ -447,10 +450,10 @@ func getMasterSSHClient() (*ssh.Client, error) {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	host := framework.GetMasterHost() + ":22"
+	host := framework.APIAddress() + ":22"
 	client, err := ssh.Dial("tcp", host, config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting SSH client to host %s: '%v'", host, err)
+		return nil, fmt.Errorf("error getting SSH client to host %s: %w", host, err)
 	}
 	return client, err
 }
@@ -465,7 +468,7 @@ func sshExec(client *ssh.Client, cmd string) (string, string, int, error) {
 	framework.Logf("Executing '%s' on %v", cmd, client.RemoteAddr())
 	session, err := client.NewSession()
 	if err != nil {
-		return "", "", 0, fmt.Errorf("error creating session to host %s: '%v'", client.RemoteAddr(), err)
+		return "", "", 0, fmt.Errorf("error creating session to host %s: %w", client.RemoteAddr(), err)
 	}
 	defer session.Close()
 
@@ -487,7 +490,7 @@ func sshExec(client *ssh.Client, cmd string) (string, string, int, error) {
 		} else {
 			// Some other kind of error happened (e.g. an IOError); consider the
 			// SSH unsuccessful.
-			err = fmt.Errorf("failed running `%s` on %s: '%v'", cmd, client.RemoteAddr(), err)
+			err = fmt.Errorf("failed running `%s` on %s: %w", cmd, client.RemoteAddr(), err)
 		}
 	}
 	return bout.String(), berr.String(), code, err
@@ -497,7 +500,7 @@ func writeRemoteFile(sshClient *ssh.Client, data, dir, fileName string, mode os.
 	framework.Logf(fmt.Sprintf("Writing remote file '%s/%s' on %v", dir, fileName, sshClient.RemoteAddr()))
 	session, err := sshClient.NewSession()
 	if err != nil {
-		return fmt.Errorf("error creating session to host %s: '%v'", sshClient.RemoteAddr(), err)
+		return fmt.Errorf("error creating session to host %s: %w", sshClient.RemoteAddr(), err)
 	}
 	defer session.Close()
 

@@ -20,7 +20,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -124,27 +124,20 @@ func (o *ConvertOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) (err er
 	}
 
 	o.validator = func() (validation.Schema, error) {
-		return f.Validator(cmdutil.GetFlagBool(cmd, "validate"))
+		directive, err := cmdutil.GetValidationDirective(cmd)
+		if err != nil {
+			return nil, err
+		}
+		return f.Validator(directive)
 	}
 
 	// build the printer
 	o.Printer, err = o.PrintFlags.ToPrinter()
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 // RunConvert implements the generic Convert command
 func (o *ConvertOptions) RunConvert() error {
-
-	// Convert must be removed from kubectl, since kubectl can not depend on
-	// Kubernetes "internal" dependencies. These "internal" dependencies can
-	// not be removed from convert. Another way to convert a resource is to
-	// "kubectl apply" it to the cluster, then "kubectl get" at the desired version.
-	// Another possible solution is to make convert a plugin.
-	fmt.Fprintf(o.ErrOut, "kubectl convert is DEPRECATED and will be removed in a future version.\nIn order to convert, kubectl apply the object to the cluster, then kubectl get at the desired version.\n")
-
 	b := o.builder().
 		WithScheme(scheme.Scheme).
 		LocalParam(o.local)

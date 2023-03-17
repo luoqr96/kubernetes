@@ -32,7 +32,7 @@ import (
 // TestWantsAuthorizer ensures that the authorizer is injected
 // when the WantsAuthorizer interface is implemented by a plugin.
 func TestWantsAuthorizer(t *testing.T) {
-	target := initializer.New(nil, nil, &TestAuthorizer{}, nil)
+	target := initializer.New(nil, nil, nil, &TestAuthorizer{}, nil, nil)
 	wantAuthorizerAdmission := &WantAuthorizerAdmission{}
 	target.Initialize(wantAuthorizerAdmission)
 	if wantAuthorizerAdmission.auth == nil {
@@ -44,7 +44,7 @@ func TestWantsAuthorizer(t *testing.T) {
 // when the WantsExternalKubeClientSet interface is implemented by a plugin.
 func TestWantsExternalKubeClientSet(t *testing.T) {
 	cs := &fake.Clientset{}
-	target := initializer.New(cs, nil, &TestAuthorizer{}, nil)
+	target := initializer.New(cs, nil, nil, &TestAuthorizer{}, nil, nil)
 	wantExternalKubeClientSet := &WantExternalKubeClientSet{}
 	target.Initialize(wantExternalKubeClientSet)
 	if wantExternalKubeClientSet.cs != cs {
@@ -57,11 +57,23 @@ func TestWantsExternalKubeClientSet(t *testing.T) {
 func TestWantsExternalKubeInformerFactory(t *testing.T) {
 	cs := &fake.Clientset{}
 	sf := informers.NewSharedInformerFactory(cs, time.Duration(1)*time.Second)
-	target := initializer.New(cs, sf, &TestAuthorizer{}, nil)
+	target := initializer.New(cs, nil, sf, &TestAuthorizer{}, nil, nil)
 	wantExternalKubeInformerFactory := &WantExternalKubeInformerFactory{}
 	target.Initialize(wantExternalKubeInformerFactory)
 	if wantExternalKubeInformerFactory.sf != sf {
 		t.Errorf("expected informer factory to be initialized")
+	}
+}
+
+// TestWantsShutdownSignal ensures that the shutdown signal is injected
+// when the WantsShutdownSignal interface is implemented by a plugin.
+func TestWantsShutdownNotification(t *testing.T) {
+	stopCh := make(chan struct{})
+	target := initializer.New(nil, nil, nil, &TestAuthorizer{}, nil, stopCh)
+	wantDrainedNotification := &WantDrainedNotification{}
+	target.Initialize(wantDrainedNotification)
+	if wantDrainedNotification.stopCh == nil {
+		t.Errorf("expected stopCh to be initialized but found nil")
 	}
 }
 
@@ -87,7 +99,9 @@ type WantExternalKubeClientSet struct {
 	cs kubernetes.Interface
 }
 
-func (self *WantExternalKubeClientSet) SetExternalKubeClientSet(cs kubernetes.Interface) { self.cs = cs }
+func (self *WantExternalKubeClientSet) SetExternalKubeClientSet(cs kubernetes.Interface) {
+	self.cs = cs
+}
 func (self *WantExternalKubeClientSet) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
 	return nil
 }
@@ -112,21 +126,26 @@ func (self *WantAuthorizerAdmission) ValidateInitialization() error      { retur
 var _ admission.Interface = &WantAuthorizerAdmission{}
 var _ initializer.WantsAuthorizer = &WantAuthorizerAdmission{}
 
+// WantDrainedNotification is a test stub that filfills the WantsDrainedNotification interface.
+type WantDrainedNotification struct {
+	stopCh <-chan struct{}
+}
+
+func (self *WantDrainedNotification) SetDrainedNotification(stopCh <-chan struct{}) {
+	self.stopCh = stopCh
+}
+func (self *WantDrainedNotification) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
+	return nil
+}
+func (self *WantDrainedNotification) Handles(o admission.Operation) bool { return false }
+func (self *WantDrainedNotification) ValidateInitialization() error      { return nil }
+
+var _ admission.Interface = &WantDrainedNotification{}
+var _ initializer.WantsDrainedNotification = &WantDrainedNotification{}
+
 // TestAuthorizer is a test stub that fulfills the WantsAuthorizer interface.
 type TestAuthorizer struct{}
 
 func (t *TestAuthorizer) Authorize(ctx context.Context, a authorizer.Attributes) (authorized authorizer.Decision, reason string, err error) {
 	return authorizer.DecisionNoOpinion, "", nil
 }
-
-// wantClientCert is a test stub for testing that fulfulls the WantsClientCert interface.
-type clientCertWanter struct {
-	gotCert, gotKey []byte
-}
-
-func (s *clientCertWanter) SetClientCert(cert, key []byte) { s.gotCert, s.gotKey = cert, key }
-func (s *clientCertWanter) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
-	return nil
-}
-func (s *clientCertWanter) Handles(o admission.Operation) bool { return false }
-func (s *clientCertWanter) ValidateInitialization() error      { return nil }

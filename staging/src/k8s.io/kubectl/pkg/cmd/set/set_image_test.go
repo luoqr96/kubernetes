@@ -18,7 +18,7 @@ package set
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -60,7 +60,8 @@ func TestImageLocal(t *testing.T) {
 
 	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 	cmd := NewCmdImage(tf, streams)
-	cmd.SetOutput(buf)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
 	cmd.Flags().Set("output", outputFormat)
 	cmd.Flags().Set("local", "true")
 
@@ -172,7 +173,8 @@ func TestSetMultiResourcesImageLocal(t *testing.T) {
 
 	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 	cmd := NewCmdImage(tf, streams)
-	cmd.SetOutput(buf)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
 	cmd.Flags().Set("output", outputFormat)
 	cmd.Flags().Set("local", "true")
 
@@ -559,22 +561,26 @@ func TestSetImageRemote(t *testing.T) {
 			args:         []string{"statefulset", "nginx", "*=thingy"},
 		},
 		{
-			name: "set image batchv1 Job",
-			object: &batchv1.Job{
+			name: "set image batchv1 CronJob",
+			object: &batchv1.CronJob{
 				ObjectMeta: metav1.ObjectMeta{Name: "nginx"},
-				Spec: batchv1.JobSpec{
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "nginx",
-									Image: "nginx",
-								},
-							},
-							InitContainers: []corev1.Container{
-								{
-									Name:  "busybox",
-									Image: "busybox",
+				Spec: batchv1.CronJobSpec{
+					JobTemplate: batchv1.JobTemplateSpec{
+						Spec: batchv1.JobSpec{
+							Template: corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "nginx",
+											Image: "nginx",
+										},
+									},
+									InitContainers: []corev1.Container{
+										{
+											Name:  "busybox",
+											Image: "busybox",
+										},
+									},
 								},
 							},
 						},
@@ -582,8 +588,8 @@ func TestSetImageRemote(t *testing.T) {
 				},
 			},
 			groupVersion: batchv1.SchemeGroupVersion,
-			path:         "/namespaces/test/jobs/nginx",
-			args:         []string{"job", "nginx", "*=thingy"},
+			path:         "/namespaces/test/cronjobs/nginx",
+			args:         []string{"cronjob", "nginx", "*=thingy"},
 		},
 		{
 			name: "set image corev1.ReplicationController",
@@ -630,7 +636,7 @@ func TestSetImageRemote(t *testing.T) {
 						if err != nil {
 							return nil, err
 						}
-						bytes, err := ioutil.ReadAll(stream)
+						bytes, err := io.ReadAll(stream)
 						if err != nil {
 							return nil, err
 						}
@@ -742,7 +748,7 @@ func TestSetImageRemoteWithSpecificContainers(t *testing.T) {
 						if err != nil {
 							return nil, err
 						}
-						bytes, err := ioutil.ReadAll(stream)
+						bytes, err := io.ReadAll(stream)
 						if err != nil {
 							return nil, err
 						}
@@ -772,5 +778,20 @@ func TestSetImageRemoteWithSpecificContainers(t *testing.T) {
 			err = opts.Run()
 			assert.NoError(t, err)
 		})
+	}
+}
+
+func TestSetImageResolver(t *testing.T) {
+	f := func(in string) (string, error) {
+		return "custom", nil
+	}
+
+	ImageResolver = f
+
+	out, err := ImageResolver("my-image")
+	if err != nil {
+		t.Errorf("unexpected error from ImageResolver: %v", err)
+	} else if out != "custom" {
+		t.Errorf("expected: %s, found: %s", "custom", out)
 	}
 }

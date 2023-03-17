@@ -22,8 +22,10 @@ import (
 	"path/filepath"
 
 	"github.com/pkg/errors"
-	clientcmd "k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog"
+
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
+
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
@@ -49,14 +51,14 @@ func NewKubeletFinalizePhase() workflow.Phase {
 			{
 				Name:           "all",
 				Short:          "Run all kubelet-finalize phases",
-				InheritFlags:   []string{options.CfgPath, options.CertificatesDir},
+				InheritFlags:   []string{options.CfgPath, options.CertificatesDir, options.DryRun},
 				Example:        kubeletFinalizePhaseExample,
 				RunAllSiblings: true,
 			},
 			{
 				Name:         "experimental-cert-rotation",
 				Short:        "Enable kubelet client certificate rotation",
-				InheritFlags: []string{options.CfgPath, options.CertificatesDir},
+				InheritFlags: []string{options.CfgPath, options.CertificatesDir, options.DryRun},
 				Run:          runKubeletFinalizeCertRotation,
 			},
 		},

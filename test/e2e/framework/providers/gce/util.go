@@ -17,6 +17,7 @@ limitations under the License.
 package gce
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -35,12 +36,12 @@ func RecreateNodes(c clientset.Interface, nodes []v1.Node) error {
 	for i := range nodes {
 		node := &nodes[i]
 
-		if zone, ok := node.Labels[v1.LabelZoneFailureDomain]; ok {
+		if zone, ok := node.Labels[v1.LabelFailureDomainBetaZone]; ok {
 			nodeNamesByZone[zone] = append(nodeNamesByZone[zone], node.Name)
 			continue
 		}
 
-		if zone, ok := node.Labels[v1.LabelZoneFailureDomainStable]; ok {
+		if zone, ok := node.Labels[v1.LabelTopologyZone]; ok {
 			nodeNamesByZone[zone] = append(nodeNamesByZone[zone], node.Name)
 			continue
 		}
@@ -79,12 +80,12 @@ func RecreateNodes(c clientset.Interface, nodes []v1.Node) error {
 }
 
 // WaitForNodeBootIdsToChange waits for the boot ids of the given nodes to change in order to verify the node has been recreated.
-func WaitForNodeBootIdsToChange(c clientset.Interface, nodes []v1.Node, timeout time.Duration) error {
+func WaitForNodeBootIdsToChange(ctx context.Context, c clientset.Interface, nodes []v1.Node, timeout time.Duration) error {
 	errMsg := []string{}
 	for i := range nodes {
 		node := &nodes[i]
-		if err := wait.Poll(30*time.Second, timeout, func() (bool, error) {
-			newNode, err := c.CoreV1().Nodes().Get(node.Name, metav1.GetOptions{})
+		if err := wait.PollWithContext(ctx, 30*time.Second, timeout, func(ctx context.Context) (bool, error) {
+			newNode, err := c.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
 			if err != nil {
 				framework.Logf("Could not get node info: %s. Retrying in %v.", err, 30*time.Second)
 				return false, nil

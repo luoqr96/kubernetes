@@ -17,6 +17,7 @@ limitations under the License.
 package dynamicinformer
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -119,24 +120,27 @@ func (f *dynamicSharedInformerFactory) WaitForCacheSync(stopCh <-chan struct{}) 
 func NewFilteredDynamicInformer(client dynamic.Interface, gvr schema.GroupVersionResource, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions TweakListOptionsFunc) informers.GenericInformer {
 	return &dynamicInformer{
 		gvr: gvr,
-		informer: cache.NewSharedIndexInformer(
+		informer: cache.NewSharedIndexInformerWithOptions(
 			&cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 					if tweakListOptions != nil {
 						tweakListOptions(&options)
 					}
-					return client.Resource(gvr).Namespace(namespace).List(options)
+					return client.Resource(gvr).Namespace(namespace).List(context.TODO(), options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 					if tweakListOptions != nil {
 						tweakListOptions(&options)
 					}
-					return client.Resource(gvr).Namespace(namespace).Watch(options)
+					return client.Resource(gvr).Namespace(namespace).Watch(context.TODO(), options)
 				},
 			},
 			&unstructured.Unstructured{},
-			resyncPeriod,
-			indexers,
+			cache.SharedIndexInformerOptions{
+				ResyncPeriod:      resyncPeriod,
+				Indexers:          indexers,
+				ObjectDescription: gvr.String(),
+			},
 		),
 	}
 }

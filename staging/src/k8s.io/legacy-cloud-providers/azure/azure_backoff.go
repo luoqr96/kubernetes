@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -20,27 +21,37 @@ package azure
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-07-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-06-01/network"
-	"github.com/Azure/go-autorest/autorest/to"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	azcache "k8s.io/legacy-cloud-providers/azure/cache"
 	"k8s.io/legacy-cloud-providers/azure/retry"
+	"k8s.io/utils/pointer"
 )
 
 const (
 	// not active means the instance is under deleting from Azure VMSS.
 	vmssVMNotActiveErrorMessage = "not an active Virtual Machine Scale Set VM instanceId"
 
-	// operationCancledErrorMessage means the operation is canceled by another new operation.
-	operationCancledErrorMessage = "canceledandsupersededduetoanotheroperation"
+	// operationCanceledErrorMessage means the operation is canceled by another new operation.
+	operationCanceledErrorMessage = "canceledandsupersededduetoanotheroperation"
+
+	cannotDeletePublicIPErrorMessageCode = "PublicIPAddressCannotBeDeleted"
+
+	referencedResourceNotProvisionedMessageCode = "ReferencedResourceNotProvisioned"
+)
+
+var (
+	pipErrorMessageRE = regexp.MustCompile(`(?:.*)/subscriptions/(?:.*)/resourceGroups/(.*)/providers/Microsoft.Network/publicIPAddresses/([^\s]+)(?:.*)`)
 )
 
 // RequestBackoff if backoff is disabled in cloud provider it
@@ -58,14 +69,14 @@ func (az *Cloud) RequestBackoff() (resourceRequestBackoff wait.Backoff) {
 }
 
 // Event creates a event for the specified object.
-func (az *Cloud) Event(obj runtime.Object, eventtype, reason, message string) {
+func (az *Cloud) Event(obj runtime.Object, eventType, reason, message string) {
 	if obj != nil && reason != "" {
-		az.eventRecorder.Event(obj, eventtype, reason, message)
+		az.eventRecorder.Event(obj, eventType, reason, message)
 	}
 }
 
 // GetVirtualMachineWithRetry invokes az.getVirtualMachine with exponential backoff retry
-func (az *Cloud) GetVirtualMachineWithRetry(name types.NodeName, crt cacheReadType) (compute.VirtualMachine, error) {
+func (az *Cloud) GetVirtualMachineWithRetry(name types.NodeName, crt azcache.AzureCacheReadType) (compute.VirtualMachine, error) {
 	var machine compute.VirtualMachine
 	var retryErr error
 	err := wait.ExponentialBackoff(az.RequestBackoff(), func() (bool, error) {
@@ -103,10 +114,6 @@ func (az *Cloud) ListVirtualMachines(resourceGroup string) ([]compute.VirtualMac
 // getPrivateIPsForMachine is wrapper for optional backoff getting private ips
 // list of a node by name
 func (az *Cloud) getPrivateIPsForMachine(nodeName types.NodeName) ([]string, error) {
-	if az.Config.shouldOmitCloudProviderBackoff() {
-		return az.vmSet.GetPrivateIPsByNodeName(string(nodeName))
-	}
-
 	return az.getPrivateIPsForMachineWithRetry(nodeName)
 }
 
@@ -114,7 +121,7 @@ func (az *Cloud) getPrivateIPsForMachineWithRetry(nodeName types.NodeName) ([]st
 	var privateIPs []string
 	err := wait.ExponentialBackoff(az.RequestBackoff(), func() (bool, error) {
 		var retryErr error
-		privateIPs, retryErr = az.vmSet.GetPrivateIPsByNodeName(string(nodeName))
+		privateIPs, retryErr = az.VMSet.GetPrivateIPsByNodeName(string(nodeName))
 		if retryErr != nil {
 			// won't retry since the instance doesn't exist on Azure.
 			if retryErr == cloudprovider.InstanceNotFound {
@@ -130,10 +137,6 @@ func (az *Cloud) getPrivateIPsForMachineWithRetry(nodeName types.NodeName) ([]st
 }
 
 func (az *Cloud) getIPForMachine(nodeName types.NodeName) (string, string, error) {
-	if az.Config.shouldOmitCloudProviderBackoff() {
-		return az.vmSet.GetIPByNodeName(string(nodeName))
-	}
-
 	return az.GetIPForMachineWithRetry(nodeName)
 }
 
@@ -142,7 +145,7 @@ func (az *Cloud) GetIPForMachineWithRetry(name types.NodeName) (string, string, 
 	var ip, publicIP string
 	err := wait.ExponentialBackoff(az.RequestBackoff(), func() (bool, error) {
 		var retryErr error
-		ip, publicIP, retryErr = az.vmSet.GetIPByNodeName(string(name))
+		ip, publicIP, retryErr = az.VMSet.GetIPByNodeName(string(name))
 		if retryErr != nil {
 			klog.Errorf("GetIPForMachineWithRetry(%s): backoff failure, will retry,err=%v", name, retryErr)
 			return false, nil
@@ -154,11 +157,11 @@ func (az *Cloud) GetIPForMachineWithRetry(name types.NodeName) (string, string, 
 }
 
 // CreateOrUpdateSecurityGroup invokes az.SecurityGroupsClient.CreateOrUpdate with exponential backoff retry
-func (az *Cloud) CreateOrUpdateSecurityGroup(service *v1.Service, sg network.SecurityGroup) error {
+func (az *Cloud) CreateOrUpdateSecurityGroup(sg network.SecurityGroup) error {
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
 
-	rerr := az.SecurityGroupsClient.CreateOrUpdate(ctx, az.SecurityGroupResourceGroup, *sg.Name, sg, to.String(sg.Etag))
+	rerr := az.SecurityGroupsClient.CreateOrUpdate(ctx, az.SecurityGroupResourceGroup, *sg.Name, sg, pointer.StringDeref(sg.Etag, ""))
 	klog.V(10).Infof("SecurityGroupsClient.CreateOrUpdate(%s): end", *sg.Name)
 	if rerr == nil {
 		// Invalidate the cache right after updating
@@ -173,12 +176,39 @@ func (az *Cloud) CreateOrUpdateSecurityGroup(service *v1.Service, sg network.Sec
 	}
 
 	// Invalidate the cache because another new operation has canceled the current request.
-	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCancledErrorMessage) {
-		klog.V(3).Infof("SecurityGroup cache for %s is cleanup because CreateOrUpdateSecurityGroup is canceld by another operation", *sg.Name)
+	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCanceledErrorMessage) {
+		klog.V(3).Infof("SecurityGroup cache for %s is cleanup because CreateOrUpdateSecurityGroup is canceled by another operation", *sg.Name)
 		az.nsgCache.Delete(*sg.Name)
 	}
 
 	return rerr.Error()
+}
+
+func cleanupSubnetInFrontendIPConfigurations(lb *network.LoadBalancer) network.LoadBalancer {
+	if lb.LoadBalancerPropertiesFormat == nil || lb.FrontendIPConfigurations == nil {
+		return *lb
+	}
+
+	frontendIPConfigurations := *lb.FrontendIPConfigurations
+	for i := range frontendIPConfigurations {
+		config := frontendIPConfigurations[i]
+		if config.FrontendIPConfigurationPropertiesFormat != nil &&
+			config.Subnet != nil &&
+			config.Subnet.ID != nil {
+			subnet := network.Subnet{
+				ID: config.Subnet.ID,
+			}
+			if config.Subnet.Name != nil {
+				subnet.Name = config.FrontendIPConfigurationPropertiesFormat.Subnet.Name
+			}
+			config.FrontendIPConfigurationPropertiesFormat.Subnet = &subnet
+			frontendIPConfigurations[i] = config
+			continue
+		}
+	}
+
+	lb.FrontendIPConfigurations = &frontendIPConfigurations
+	return *lb
 }
 
 // CreateOrUpdateLB invokes az.LoadBalancerClient.CreateOrUpdate with exponential backoff retry
@@ -186,8 +216,10 @@ func (az *Cloud) CreateOrUpdateLB(service *v1.Service, lb network.LoadBalancer) 
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
 
+	lb = cleanupSubnetInFrontendIPConfigurations(&lb)
+
 	rgName := az.getLoadBalancerResourceGroup()
-	rerr := az.LoadBalancerClient.CreateOrUpdate(ctx, rgName, *lb.Name, lb, to.String(lb.Etag))
+	rerr := az.LoadBalancerClient.CreateOrUpdate(ctx, rgName, pointer.StringDeref(lb.Name, ""), lb, pointer.StringDeref(lb.Etag, ""))
 	klog.V(10).Infof("LoadBalancerClient.CreateOrUpdate(%s): end", *lb.Name)
 	if rerr == nil {
 		// Invalidate the cache right after updating
@@ -197,12 +229,39 @@ func (az *Cloud) CreateOrUpdateLB(service *v1.Service, lb network.LoadBalancer) 
 
 	// Invalidate the cache because ETAG precondition mismatch.
 	if rerr.HTTPStatusCode == http.StatusPreconditionFailed {
-		klog.V(3).Infof("LoadBalancer cache for %s is cleanup because of http.StatusPreconditionFailed", *lb.Name)
+		klog.V(3).Infof("LoadBalancer cache for %s is cleanup because of http.StatusPreconditionFailed", pointer.StringDeref(lb.Name, ""))
 		az.lbCache.Delete(*lb.Name)
 	}
+
+	retryErrorMessage := rerr.Error().Error()
 	// Invalidate the cache because another new operation has canceled the current request.
-	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCancledErrorMessage) {
-		klog.V(3).Infof("LoadBalancer cache for %s is cleanup because CreateOrUpdate is canceled by another operation", *lb.Name)
+	if strings.Contains(strings.ToLower(retryErrorMessage), operationCanceledErrorMessage) {
+		klog.V(3).Infof("LoadBalancer cache for %s is cleanup because CreateOrUpdate is canceled by another operation", pointer.StringDeref(lb.Name, ""))
+		az.lbCache.Delete(*lb.Name)
+	}
+
+	// The LB update may fail because the referenced PIP is not in the Succeeded provisioning state
+	if strings.Contains(strings.ToLower(retryErrorMessage), strings.ToLower(referencedResourceNotProvisionedMessageCode)) {
+		matches := pipErrorMessageRE.FindStringSubmatch(retryErrorMessage)
+		if len(matches) != 3 {
+			klog.Warningf("Failed to parse the retry error message %s", retryErrorMessage)
+			return rerr.Error()
+		}
+		pipRG, pipName := matches[1], matches[2]
+		klog.V(3).Infof("The public IP %s referenced by load balancer %s is not in Succeeded provisioning state, will try to update it", pipName, pointer.StringDeref(lb.Name, ""))
+		pip, _, err := az.getPublicIPAddress(pipRG, pipName)
+		if err != nil {
+			klog.Warningf("Failed to get the public IP %s in resource group %s: %v", pipName, pipRG, err)
+			return rerr.Error()
+		}
+		// Perform a dummy update to fix the provisioning state
+		err = az.CreateOrUpdatePIP(service, pipRG, pip)
+		if err != nil {
+			klog.Warningf("Failed to update the public IP %s in resource group %s: %v", pipName, pipRG, err)
+			return rerr.Error()
+		}
+		// Invalidate the LB cache, return the error, and the controller manager
+		// would retry the LB update in the next reconcile loop
 		az.lbCache.Delete(*lb.Name)
 	}
 
@@ -217,6 +276,9 @@ func (az *Cloud) ListLB(service *v1.Service) ([]network.LoadBalancer, error) {
 	rgName := az.getLoadBalancerResourceGroup()
 	allLBs, rerr := az.LoadBalancerClient.List(ctx, rgName)
 	if rerr != nil {
+		if rerr.IsNotFound() {
+			return nil, nil
+		}
 		az.Event(service, v1.EventTypeWarning, "ListLoadBalancers", rerr.Error().Error())
 		klog.Errorf("LoadBalancerClient.List(%v) failure with err=%v", rgName, rerr)
 		return nil, rerr.Error()
@@ -232,6 +294,9 @@ func (az *Cloud) ListPIP(service *v1.Service, pipResourceGroup string) ([]networ
 
 	allPIPs, rerr := az.PublicIPAddressesClient.List(ctx, pipResourceGroup)
 	if rerr != nil {
+		if rerr.IsNotFound() {
+			return nil, nil
+		}
 		az.Event(service, v1.EventTypeWarning, "ListPublicIPs", rerr.Error().Error())
 		klog.Errorf("PublicIPAddressesClient.List(%v) failure with err=%v", pipResourceGroup, rerr)
 		return nil, rerr.Error()
@@ -246,10 +311,10 @@ func (az *Cloud) CreateOrUpdatePIP(service *v1.Service, pipResourceGroup string,
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
 
-	rerr := az.PublicIPAddressesClient.CreateOrUpdate(ctx, pipResourceGroup, *pip.Name, pip)
-	klog.V(10).Infof("PublicIPAddressesClient.CreateOrUpdate(%s, %s): end", pipResourceGroup, *pip.Name)
+	rerr := az.PublicIPAddressesClient.CreateOrUpdate(ctx, pipResourceGroup, pointer.StringDeref(pip.Name, ""), pip)
+	klog.V(10).Infof("PublicIPAddressesClient.CreateOrUpdate(%s, %s): end", pipResourceGroup, pointer.StringDeref(pip.Name, ""))
 	if rerr != nil {
-		klog.Errorf("PublicIPAddressesClient.CreateOrUpdate(%s, %s) failed: %s", pipResourceGroup, *pip.Name, rerr.Error().Error())
+		klog.Errorf("PublicIPAddressesClient.CreateOrUpdate(%s, %s) failed: %s", pipResourceGroup, pointer.StringDeref(pip.Name, ""), rerr.Error().Error())
 		az.Event(service, v1.EventTypeWarning, "CreateOrUpdatePublicIPAddress", rerr.Error().Error())
 		return rerr.Error()
 	}
@@ -282,6 +347,11 @@ func (az *Cloud) DeletePublicIP(service *v1.Service, pipResourceGroup string, pi
 	if rerr != nil {
 		klog.Errorf("PublicIPAddressesClient.Delete(%s) failed: %s", pipName, rerr.Error().Error())
 		az.Event(service, v1.EventTypeWarning, "DeletePublicIPAddress", rerr.Error().Error())
+
+		if strings.Contains(rerr.Error().Error(), cannotDeletePublicIPErrorMessageCode) {
+			klog.Warningf("DeletePublicIP for public IP %s failed with error %v, this is because other resources are referencing the public IP. The deletion of the service will continue.", pipName, rerr.Error())
+			return nil
+		}
 		return rerr.Error()
 	}
 
@@ -311,7 +381,7 @@ func (az *Cloud) CreateOrUpdateRouteTable(routeTable network.RouteTable) error {
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
 
-	rerr := az.RouteTablesClient.CreateOrUpdate(ctx, az.RouteTableResourceGroup, az.RouteTableName, routeTable, to.String(routeTable.Etag))
+	rerr := az.RouteTablesClient.CreateOrUpdate(ctx, az.RouteTableResourceGroup, az.RouteTableName, routeTable, pointer.StringDeref(routeTable.Etag, ""))
 	if rerr == nil {
 		// Invalidate the cache right after updating
 		az.rtCache.Delete(*routeTable.Name)
@@ -324,8 +394,8 @@ func (az *Cloud) CreateOrUpdateRouteTable(routeTable network.RouteTable) error {
 		az.rtCache.Delete(*routeTable.Name)
 	}
 	// Invalidate the cache because another new operation has canceled the current request.
-	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCancledErrorMessage) {
-		klog.V(3).Infof("Route table cache for %s is cleanup because CreateOrUpdateRouteTable is canceld by another operation", *routeTable.Name)
+	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCanceledErrorMessage) {
+		klog.V(3).Infof("Route table cache for %s is cleanup because CreateOrUpdateRouteTable is canceled by another operation", *routeTable.Name)
 		az.rtCache.Delete(*routeTable.Name)
 	}
 	klog.Errorf("RouteTablesClient.CreateOrUpdate(%s) failed: %v", az.RouteTableName, rerr.Error())
@@ -337,7 +407,7 @@ func (az *Cloud) CreateOrUpdateRoute(route network.Route) error {
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
 
-	rerr := az.RoutesClient.CreateOrUpdate(ctx, az.RouteTableResourceGroup, az.RouteTableName, *route.Name, route, to.String(route.Etag))
+	rerr := az.RoutesClient.CreateOrUpdate(ctx, az.RouteTableResourceGroup, az.RouteTableName, *route.Name, route, pointer.StringDeref(route.Etag, ""))
 	klog.V(10).Infof("RoutesClient.CreateOrUpdate(%s): end", *route.Name)
 	if rerr == nil {
 		az.rtCache.Delete(az.RouteTableName)
@@ -349,8 +419,8 @@ func (az *Cloud) CreateOrUpdateRoute(route network.Route) error {
 		az.rtCache.Delete(az.RouteTableName)
 	}
 	// Invalidate the cache because another new operation has canceled the current request.
-	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCancledErrorMessage) {
-		klog.V(3).Infof("Route cache for %s is cleanup because CreateOrUpdateRouteTable is canceld by another operation", *route.Name)
+	if strings.Contains(strings.ToLower(rerr.Error().Error()), operationCanceledErrorMessage) {
+		klog.V(3).Infof("Route cache for %s is cleanup because CreateOrUpdateRouteTable is canceled by another operation", *route.Name)
 		az.rtCache.Delete(az.RouteTableName)
 	}
 	return rerr.Error()
@@ -397,8 +467,4 @@ func (az *Cloud) CreateOrUpdateVMSS(resourceGroupName string, VMScaleSetName str
 	}
 
 	return nil
-}
-
-func (cfg *Config) shouldOmitCloudProviderBackoff() bool {
-	return cfg.CloudProviderBackoffMode == backoffModeV2
 }

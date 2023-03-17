@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest/fake"
@@ -33,8 +34,8 @@ import (
 
 func TestCreateRole(t *testing.T) {
 	roleName := "my-role"
-
-	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	testNameSpace := "test"
+	tf := cmdtesting.NewTestFactory().WithNamespace(testNameSpace)
 	defer tf.Cleanup()
 
 	tf.Client = &fake.RESTClient{}
@@ -52,7 +53,8 @@ func TestCreateRole(t *testing.T) {
 			expectedRole: &rbac.Role{
 				TypeMeta: v1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
 				ObjectMeta: v1.ObjectMeta{
-					Name: roleName,
+					Name:      roleName,
+					Namespace: testNameSpace,
 				},
 				Rules: []rbac.PolicyRule{
 					{
@@ -70,7 +72,8 @@ func TestCreateRole(t *testing.T) {
 			expectedRole: &rbac.Role{
 				TypeMeta: v1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
 				ObjectMeta: v1.ObjectMeta{
-					Name: roleName,
+					Name:      roleName,
+					Namespace: testNameSpace,
 				},
 				Rules: []rbac.PolicyRule{
 					{
@@ -88,7 +91,8 @@ func TestCreateRole(t *testing.T) {
 			expectedRole: &rbac.Role{
 				TypeMeta: v1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
 				ObjectMeta: v1.ObjectMeta{
-					Name: roleName,
+					Name:      roleName,
+					Namespace: testNameSpace,
 				},
 				Rules: []rbac.PolicyRule{
 					{
@@ -106,7 +110,8 @@ func TestCreateRole(t *testing.T) {
 			expectedRole: &rbac.Role{
 				TypeMeta: v1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
 				ObjectMeta: v1.ObjectMeta{
-					Name: roleName,
+					Name:      roleName,
+					Namespace: testNameSpace,
 				},
 				Rules: []rbac.PolicyRule{
 					{
@@ -130,7 +135,7 @@ func TestCreateRole(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ioStreams, _, buf, _ := genericclioptions.NewTestIOStreams()
 			cmd := NewCmdCreateRole(tf, ioStreams)
-			cmd.Flags().Set("dry-run", "true")
+			cmd.Flags().Set("dry-run", "client")
 			cmd.Flags().Set("output", "yaml")
 			cmd.Flags().Set("verb", test.verbs)
 			cmd.Flags().Set("resource", test.resources)
@@ -209,7 +214,7 @@ func TestValidate(t *testing.T) {
 					},
 				},
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		"test-nonresource-verb": {
 			roleOptions: &CreateRoleOptions{
@@ -221,7 +226,7 @@ func TestValidate(t *testing.T) {
 					},
 				},
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		"test-special-verb": {
 			roleOptions: &CreateRoleOptions{
@@ -336,6 +341,8 @@ func TestValidate(t *testing.T) {
 	}
 
 	for name, test := range tests {
+		test.roleOptions.IOStreams = genericclioptions.NewTestIOStreamsDiscard()
+
 		var err error
 		test.roleOptions.Mapper, err = tf.ToRESTMapper()
 		if err != nil {
@@ -669,5 +676,38 @@ func TestComplete(t *testing.T) {
 		if !reflect.DeepEqual(test.roleOptions.ResourceNames, test.expected.ResourceNames) {
 			t.Errorf("%s:\nexpected resource names:\n%#v\nsaw resource names:\n%#v", name, test.expected.ResourceNames, test.roleOptions.ResourceNames)
 		}
+	}
+}
+
+func TestAddSpecialVerb(t *testing.T) {
+	testCases := map[string]struct {
+		verb     string
+		resource schema.GroupResource
+	}{
+		"existing verb": {
+			verb:     "use",
+			resource: schema.GroupResource{Group: "my.custom.io", Resource: "one"},
+		},
+		"new verb": {
+			verb:     "new",
+			resource: schema.GroupResource{Group: "my.custom.io", Resource: "two"},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			AddSpecialVerb(tc.verb, tc.resource)
+			resources, ok := specialVerbs[tc.verb]
+			if !ok {
+				t.Errorf("missing expected verb: %s", tc.verb)
+			}
+
+			for _, res := range resources {
+				if reflect.DeepEqual(tc.resource, res) {
+					return
+				}
+			}
+			t.Errorf("missing expected resource:%#v", tc.resource)
+		})
 	}
 }

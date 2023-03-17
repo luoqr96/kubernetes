@@ -19,16 +19,17 @@ package validation
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
+	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/policy"
-	"k8s.io/kubernetes/pkg/security/apparmor"
-	"k8s.io/kubernetes/pkg/security/podsecuritypolicy/seccomp"
-	psputil "k8s.io/kubernetes/pkg/security/podsecuritypolicy/util"
 	"k8s.io/utils/pointer"
 )
 
@@ -40,7 +41,7 @@ func TestValidatePodDisruptionBudgetSpec(t *testing.T) {
 		MinAvailable:   &minAvailable,
 		MaxUnavailable: &maxUnavailable,
 	}
-	errs := ValidatePodDisruptionBudgetSpec(spec, field.NewPath("foo"))
+	errs := ValidatePodDisruptionBudgetSpec(spec, PodDisruptionBudgetValidationOptions{true}, field.NewPath("foo"))
 	if len(errs) == 0 {
 		t.Errorf("unexpected success for %v", spec)
 	}
@@ -59,7 +60,7 @@ func TestValidateMinAvailablePodDisruptionBudgetSpec(t *testing.T) {
 		spec := policy.PodDisruptionBudgetSpec{
 			MinAvailable: &c,
 		}
-		errs := ValidatePodDisruptionBudgetSpec(spec, field.NewPath("foo"))
+		errs := ValidatePodDisruptionBudgetSpec(spec, PodDisruptionBudgetValidationOptions{true}, field.NewPath("foo"))
 		if len(errs) != 0 {
 			t.Errorf("unexpected failure %v for %v", errs, spec)
 		}
@@ -76,7 +77,7 @@ func TestValidateMinAvailablePodDisruptionBudgetSpec(t *testing.T) {
 		spec := policy.PodDisruptionBudgetSpec{
 			MinAvailable: &c,
 		}
-		errs := ValidatePodDisruptionBudgetSpec(spec, field.NewPath("foo"))
+		errs := ValidatePodDisruptionBudgetSpec(spec, PodDisruptionBudgetValidationOptions{true}, field.NewPath("foo"))
 		if len(errs) == 0 {
 			t.Errorf("unexpected success for %v", spec)
 		}
@@ -91,33 +92,214 @@ func TestValidateMinAvailablePodAndMaxUnavailableDisruptionBudgetSpec(t *testing
 		MinAvailable:   &c1,
 		MaxUnavailable: &c2,
 	}
-	errs := ValidatePodDisruptionBudgetSpec(spec, field.NewPath("foo"))
+	errs := ValidatePodDisruptionBudgetSpec(spec, PodDisruptionBudgetValidationOptions{true}, field.NewPath("foo"))
 	if len(errs) == 0 {
 		t.Errorf("unexpected success for %v", spec)
 	}
 }
 
-func TestValidatePodDisruptionBudgetStatus(t *testing.T) {
-	successCases := []policy.PodDisruptionBudgetStatus{
-		{DisruptionsAllowed: 10},
-		{CurrentHealthy: 5},
-		{DesiredHealthy: 3},
-		{ExpectedPods: 2}}
-	for _, c := range successCases {
-		errors := ValidatePodDisruptionBudgetStatus(c, field.NewPath("status"))
-		if len(errors) > 0 {
-			t.Errorf("unexpected failure %v for %v", errors, c)
-		}
+func TestValidateUnhealthyPodEvictionPolicyDisruptionBudgetSpec(t *testing.T) {
+	c1 := intstr.FromString("10%")
+	alwaysAllowPolicy := policy.AlwaysAllow
+	invalidPolicy := policy.UnhealthyPodEvictionPolicyType("Invalid")
+
+	testCases := []struct {
+		name      string
+		pdbSpec   policy.PodDisruptionBudgetSpec
+		expectErr bool
+	}{
+		{
+			name: "valid nil UnhealthyPodEvictionPolicy",
+			pdbSpec: policy.PodDisruptionBudgetSpec{
+				MinAvailable:               &c1,
+				UnhealthyPodEvictionPolicy: nil,
+			},
+			expectErr: false,
+		},
+		{
+			name: "valid UnhealthyPodEvictionPolicy",
+			pdbSpec: policy.PodDisruptionBudgetSpec{
+				MinAvailable:               &c1,
+				UnhealthyPodEvictionPolicy: &alwaysAllowPolicy,
+			},
+			expectErr: false,
+		},
+		{
+			name: "empty UnhealthyPodEvictionPolicy",
+			pdbSpec: policy.PodDisruptionBudgetSpec{
+				MinAvailable:               &c1,
+				UnhealthyPodEvictionPolicy: new(policy.UnhealthyPodEvictionPolicyType),
+			},
+			expectErr: true,
+		},
+		{
+			name: "invalid UnhealthyPodEvictionPolicy",
+			pdbSpec: policy.PodDisruptionBudgetSpec{
+				MinAvailable:               &c1,
+				UnhealthyPodEvictionPolicy: &invalidPolicy,
+			},
+			expectErr: true,
+		},
 	}
-	failureCases := []policy.PodDisruptionBudgetStatus{
-		{DisruptionsAllowed: -10},
-		{CurrentHealthy: -5},
-		{DesiredHealthy: -3},
-		{ExpectedPods: -2}}
-	for _, c := range failureCases {
-		errors := ValidatePodDisruptionBudgetStatus(c, field.NewPath("status"))
-		if len(errors) == 0 {
-			t.Errorf("unexpected success for %v", c)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ValidatePodDisruptionBudgetSpec(tc.pdbSpec, PodDisruptionBudgetValidationOptions{true}, field.NewPath("foo"))
+			if len(errs) == 0 && tc.expectErr {
+				t.Errorf("unexpected success for %v", tc.pdbSpec)
+			}
+			if len(errs) != 0 && !tc.expectErr {
+				t.Errorf("unexpected failure for %v", tc.pdbSpec)
+			}
+		})
+	}
+}
+
+func TestValidatePodDisruptionBudgetStatus(t *testing.T) {
+	const expectNoErrors = false
+	const expectErrors = true
+	testCases := []struct {
+		name                string
+		pdbStatus           policy.PodDisruptionBudgetStatus
+		expectErrForVersion map[schema.GroupVersion]bool
+	}{
+		{
+			name: "DisruptionsAllowed: 10",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				DisruptionsAllowed: 10,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectNoErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "CurrentHealthy: 5",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				CurrentHealthy: 5,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectNoErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "DesiredHealthy: 3",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				DesiredHealthy: 3,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectNoErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "ExpectedPods: 2",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				ExpectedPods: 2,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectNoErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "DisruptionsAllowed: -10",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				DisruptionsAllowed: -10,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "CurrentHealthy: -5",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				CurrentHealthy: -5,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "DesiredHealthy: -3",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				DesiredHealthy: -3,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "ExpectedPods: -2",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				ExpectedPods: -2,
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "Conditions valid",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   policyv1beta1.DisruptionAllowedCondition,
+						Status: metav1.ConditionTrue,
+						LastTransitionTime: metav1.Time{
+							Time: time.Now().Add(-5 * time.Minute),
+						},
+						Reason:             policyv1beta1.SufficientPodsReason,
+						Message:            "message",
+						ObservedGeneration: 3,
+					},
+				},
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectNoErrors,
+				policyv1beta1.SchemeGroupVersion: expectNoErrors,
+			},
+		},
+		{
+			name: "Conditions not valid",
+			pdbStatus: policy.PodDisruptionBudgetStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   policyv1beta1.DisruptionAllowedCondition,
+						Status: metav1.ConditionTrue,
+					},
+					{
+						Type:   policyv1beta1.DisruptionAllowedCondition,
+						Status: metav1.ConditionFalse,
+					},
+				},
+			},
+			expectErrForVersion: map[schema.GroupVersion]bool{
+				policy.SchemeGroupVersion:        expectErrors,
+				policyv1beta1.SchemeGroupVersion: expectErrors,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		for apiVersion, expectErrors := range tc.expectErrForVersion {
+			t.Run(fmt.Sprintf("apiVersion: %s, %s", apiVersion.String(), tc.name), func(t *testing.T) {
+				errors := ValidatePodDisruptionBudgetStatusUpdate(tc.pdbStatus, policy.PodDisruptionBudgetStatus{},
+					field.NewPath("status"), apiVersion)
+				errCount := len(errors)
+
+				if errCount > 0 && !expectErrors {
+					t.Errorf("unexpected failure %v for %v", errors, tc.pdbStatus)
+				}
+
+				if errCount == 0 && expectErrors {
+					t.Errorf("expected errors but didn't one for %v", tc.pdbStatus)
+				}
+			})
 		}
 	}
 }
@@ -223,11 +405,11 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 
 	invalidAppArmorDefault := validPSP()
 	invalidAppArmorDefault.Annotations = map[string]string{
-		apparmor.DefaultProfileAnnotationKey: "not-good",
+		v1.AppArmorBetaDefaultProfileAnnotationKey: "not-good",
 	}
 	invalidAppArmorAllowed := validPSP()
 	invalidAppArmorAllowed.Annotations = map[string]string{
-		apparmor.AllowedProfilesAnnotationKey: apparmor.ProfileRuntimeDefault + ",not-good",
+		v1.AppArmorBetaAllowedProfilesAnnotationKey: v1.AppArmorBetaProfileRuntimeDefault + ",not-good",
 	}
 
 	invalidAllowedUnsafeSysctlPattern := validPSP()
@@ -246,15 +428,15 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 
 	invalidSeccompDefault := validPSP()
 	invalidSeccompDefault.Annotations = map[string]string{
-		seccomp.DefaultProfileAnnotationKey: "not-good",
+		seccompDefaultProfileAnnotationKey: "not-good",
 	}
 	invalidSeccompAllowAnyDefault := validPSP()
 	invalidSeccompAllowAnyDefault.Annotations = map[string]string{
-		seccomp.DefaultProfileAnnotationKey: "*",
+		seccompDefaultProfileAnnotationKey: "*",
 	}
 	invalidSeccompAllowed := validPSP()
 	invalidSeccompAllowed.Annotations = map[string]string{
-		seccomp.AllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",not-good",
+		seccompAllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",not-good",
 	}
 
 	invalidAllowedHostPathMissingPath := validPSP()
@@ -399,12 +581,12 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 		"invalid allowed unsafe sysctl pattern": {
 			psp:         invalidAllowedUnsafeSysctlPattern,
 			errorType:   field.ErrorTypeInvalid,
-			errorDetail: fmt.Sprintf("must have at most 253 characters and match regex %s", SysctlPatternFmt),
+			errorDetail: fmt.Sprintf("must have at most 253 characters and match regex %s", SysctlContainSlashPatternFmt),
 		},
 		"invalid forbidden sysctl pattern": {
 			psp:         invalidForbiddenSysctlPattern,
 			errorType:   field.ErrorTypeInvalid,
-			errorDetail: fmt.Sprintf("must have at most 253 characters and match regex %s", SysctlPatternFmt),
+			errorDetail: fmt.Sprintf("must have at most 253 characters and match regex %s", SysctlContainSlashPatternFmt),
 		},
 		"invalid overlapping sysctl pattern": {
 			psp:         invalidOverlappingSysctls,
@@ -521,8 +703,8 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 
 	validAppArmor := validPSP()
 	validAppArmor.Annotations = map[string]string{
-		apparmor.DefaultProfileAnnotationKey:  apparmor.ProfileRuntimeDefault,
-		apparmor.AllowedProfilesAnnotationKey: apparmor.ProfileRuntimeDefault + "," + apparmor.ProfileNamePrefix + "foo",
+		v1.AppArmorBetaDefaultProfileAnnotationKey:  v1.AppArmorBetaProfileRuntimeDefault,
+		v1.AppArmorBetaAllowedProfilesAnnotationKey: v1.AppArmorBetaProfileRuntimeDefault + "," + v1.AppArmorBetaProfileNamePrefix + "foo",
 	}
 
 	withForbiddenSysctl := validPSP()
@@ -533,8 +715,8 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 
 	validSeccomp := validPSP()
 	validSeccomp.Annotations = map[string]string{
-		seccomp.DefaultProfileAnnotationKey:  api.SeccompProfileRuntimeDefault,
-		seccomp.AllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",unconfined,localhost/foo,*",
+		seccompDefaultProfileAnnotationKey:  api.SeccompProfileRuntimeDefault,
+		seccompAllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",unconfined,localhost/foo,*",
 	}
 
 	validDefaultAllowPrivilegeEscalation := validPSP()
@@ -652,7 +834,7 @@ func TestValidatePSPVolumes(t *testing.T) {
 		}
 	}
 
-	volumes := psputil.GetAllFSTypesAsSet()
+	volumes := getAllFSTypesAsSet()
 	// add in the * value since that is a pseudo type that is not included by default
 	volumes.Insert(string(policy.All))
 
@@ -680,6 +862,12 @@ func TestIsValidSysctlPattern(t *testing.T) {
 		"abc*",
 		"a.abc*",
 		"a.b.*",
+		"a/b/c/d",
+		"a/*",
+		"a/b/*",
+		"a.b/c*",
+		"a.b/c.d",
+		"a/b.c/d",
 	}
 	invalid := []string{
 		"",
@@ -698,6 +886,10 @@ func TestIsValidSysctlPattern(t *testing.T) {
 		"a*b",
 		"*a",
 		"Abc",
+		"/",
+		"a/",
+		"/a",
+		"a*/b",
 		func(n int) string {
 			x := make([]byte, n)
 			for i := range x {
@@ -872,13 +1064,13 @@ func TestValidateRuntimeClassStrategy(t *testing.T) {
 	}, {
 		name: "valid defaulting & allow all",
 		strategy: &policy.RuntimeClassStrategyOptions{
-			DefaultRuntimeClassName:  pointer.StringPtr("native"),
+			DefaultRuntimeClassName:  pointer.String("native"),
 			AllowedRuntimeClassNames: []string{"*"},
 		},
 	}, {
 		name: "valid defaulting & allow explicit",
 		strategy: &policy.RuntimeClassStrategyOptions{
-			DefaultRuntimeClassName:  pointer.StringPtr("native"),
+			DefaultRuntimeClassName:  pointer.String("native"),
 			AllowedRuntimeClassNames: []string{"foo", "native", "sandboxed"},
 		},
 	}, {
@@ -889,20 +1081,20 @@ func TestValidateRuntimeClassStrategy(t *testing.T) {
 	}, {
 		name: "invalid default name",
 		strategy: &policy.RuntimeClassStrategyOptions{
-			DefaultRuntimeClassName: pointer.StringPtr("foo bar"),
+			DefaultRuntimeClassName: pointer.String("foo bar"),
 		},
 		expectErrors: true,
 	}, {
 		name: "disallowed default",
 		strategy: &policy.RuntimeClassStrategyOptions{
-			DefaultRuntimeClassName:  pointer.StringPtr("foo"),
+			DefaultRuntimeClassName:  pointer.String("foo"),
 			AllowedRuntimeClassNames: []string{"native", "sandboxed"},
 		},
 		expectErrors: true,
 	}, {
 		name: "nothing allowed default",
 		strategy: &policy.RuntimeClassStrategyOptions{
-			DefaultRuntimeClassName: pointer.StringPtr("foo"),
+			DefaultRuntimeClassName: pointer.String("foo"),
 		},
 		expectErrors: true,
 	}, {
@@ -934,5 +1126,82 @@ func TestValidateRuntimeClassStrategy(t *testing.T) {
 				assert.Empty(t, errs)
 			}
 		})
+	}
+}
+
+func TestAllowEphemeralVolumeType(t *testing.T) {
+	pspWithoutGenericVolume := func() *policy.PodSecurityPolicy {
+		return &policy.PodSecurityPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "psp",
+				ResourceVersion: "1",
+			},
+			Spec: policy.PodSecurityPolicySpec{
+				RunAsUser: policy.RunAsUserStrategyOptions{
+					Rule: policy.RunAsUserStrategyMustRunAs,
+				},
+				SupplementalGroups: policy.SupplementalGroupsStrategyOptions{
+					Rule: policy.SupplementalGroupsStrategyMustRunAs,
+				},
+				SELinux: policy.SELinuxStrategyOptions{
+					Rule: policy.SELinuxStrategyMustRunAs,
+				},
+				FSGroup: policy.FSGroupStrategyOptions{
+					Rule: policy.FSGroupStrategyMustRunAs,
+				},
+			},
+		}
+	}
+	pspWithGenericVolume := func() *policy.PodSecurityPolicy {
+		psp := pspWithoutGenericVolume()
+		psp.Spec.Volumes = append(psp.Spec.Volumes, policy.Ephemeral)
+		return psp
+	}
+	pspNil := func() *policy.PodSecurityPolicy {
+		return nil
+	}
+
+	pspInfo := []struct {
+		description      string
+		hasGenericVolume bool
+		psp              func() *policy.PodSecurityPolicy
+	}{
+		{
+			description:      "PodSecurityPolicySpec Without GenericVolume",
+			hasGenericVolume: false,
+			psp:              pspWithoutGenericVolume,
+		},
+		{
+			description:      "PodSecurityPolicySpec With GenericVolume",
+			hasGenericVolume: true,
+			psp:              pspWithGenericVolume,
+		},
+		{
+			description:      "is nil",
+			hasGenericVolume: false,
+			psp:              pspNil,
+		},
+	}
+
+	for _, oldPSPInfo := range pspInfo {
+		for _, newPSPInfo := range pspInfo {
+			oldPSP := oldPSPInfo.psp()
+			newPSP := newPSPInfo.psp()
+			if newPSP == nil {
+				continue
+			}
+
+			t.Run(fmt.Sprintf("old PodSecurityPolicySpec %v, new PodSecurityPolicySpec %v", oldPSPInfo.description, newPSPInfo.description), func(t *testing.T) {
+				var errs field.ErrorList
+				if oldPSP == nil {
+					errs = ValidatePodSecurityPolicy(newPSP)
+				} else {
+					errs = ValidatePodSecurityPolicyUpdate(oldPSP, newPSP)
+				}
+				if len(errs) > 0 {
+					t.Errorf("expected no errors, got: %v", errs)
+				}
+			})
+		}
 	}
 }

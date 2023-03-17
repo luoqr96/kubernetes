@@ -17,16 +17,22 @@ limitations under the License.
 package phases
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/lithammer/dedent"
 	"github.com/pkg/errors"
-	"k8s.io/apimachinery/pkg/util/version"
+
+	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	certutil "k8s.io/client-go/util/cert"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
@@ -34,6 +40,7 @@ import (
 	kubeletphase "k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
 	patchnodephase "k8s.io/kubernetes/cmd/kubeadm/app/phases/patchnode"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/apiclient"
+	dryrunutil "k8s.io/kubernetes/cmd/kubeadm/app/util/dryrun"
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
 )
 
@@ -69,6 +76,8 @@ func NewKubeletStartPhase() workflow.Phase {
 			options.TokenDiscoverySkipCAHash,
 			options.TLSBootstrapToken,
 			options.TokenStr,
+			options.Patches,
+			options.DryRun,
 		},
 	}
 }
@@ -98,7 +107,12 @@ func runKubeletStartJoinPhase(c workflow.RunData) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	bootstrapKubeConfigFile := kubeadmconstants.GetBootstrapKubeletKubeConfigPath()
+
+	data, ok := c.(JoinData)
+	if !ok {
+		return errors.New("kubelet-start phase invoked with an invalid data struct")
+	}
+	bootstrapKubeConfigFile := filepath.Join(data.KubeConfigDir(), kubeadmconstants.KubeletBootstrapKubeConfigFileName)
 
 	// Deletes the bootstrapKubeConfigFile, so the credential used for TLS bootstrap is removed from disk
 	defer os.Remove(bootstrapKubeConfigFile)
@@ -111,16 +125,18 @@ func runKubeletStartJoinPhase(c workflow.RunData) (returnErr error) {
 
 	// Write the ca certificate to disk so kubelet can use it for authentication
 	cluster := tlsBootstrapCfg.Contexts[tlsBootstrapCfg.CurrentContext].Cluster
-	if _, err := os.Stat(cfg.CACertPath); os.IsNotExist(err) {
-		klog.V(1).Infof("[kubelet-start] writing CA certificate at %s", cfg.CACertPath)
-		if err := certutil.WriteCert(cfg.CACertPath, tlsBootstrapCfg.Clusters[cluster].CertificateAuthorityData); err != nil {
-			return errors.Wrap(err, "couldn't save the CA certificate to disk")
-		}
+
+	// If we're dry-running, write ca cert in tmp
+	caPath := cfg.CACertPath
+	if data.DryRun() {
+		caPath = filepath.Join(data.CertificateWriteDir(), kubeadmconstants.CACertName)
 	}
 
-	kubeletVersion, err := version.ParseSemantic(initCfg.ClusterConfiguration.KubernetesVersion)
-	if err != nil {
-		return err
+	if _, err := os.Stat(caPath); os.IsNotExist(err) {
+		klog.V(1).Infof("[kubelet-start] writing CA certificate at %s", caPath)
+		if err := certutil.WriteCert(caPath, tlsBootstrapCfg.Clusters[cluster].CertificateAuthorityData); err != nil {
+			return errors.Wrap(err, "couldn't save the CA certificate to disk")
+		}
 	}
 
 	bootstrapClient, err := kubeconfigutil.ClientSetFromFile(bootstrapKubeConfigFile)
@@ -128,13 +144,39 @@ func runKubeletStartJoinPhase(c workflow.RunData) (returnErr error) {
 		return errors.Errorf("couldn't create client from kubeconfig file %q", bootstrapKubeConfigFile)
 	}
 
+	// Obtain the name of this Node.
+	nodeName, _, err := kubeletphase.GetNodeNameAndHostname(&cfg.NodeRegistration)
+	if err != nil {
+		klog.Warning(err)
+	}
+
+	// Make sure to exit before TLS bootstrap if a Node with the same name exist in the cluster
+	// and it has the "Ready" status.
+	// A new Node with the same name as an existing control-plane Node can cause undefined
+	// behavior and ultimately control-plane failure.
+	klog.V(1).Infof("[kubelet-start] Checking for an existing Node in the cluster with name %q and status %q", nodeName, v1.NodeReady)
+	node, err := bootstrapClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return errors.Wrapf(err, "cannot get Node %q", nodeName)
+	}
+	for _, cond := range node.Status.Conditions {
+		if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
+			return errors.Errorf("a Node with name %q and status %q already exists in the cluster. "+
+				"You must delete the existing Node or change the name of this new joining Node", nodeName, v1.NodeReady)
+		}
+	}
+
 	// Configure the kubelet. In this short timeframe, kubeadm is trying to stop/restart the kubelet
 	// Try to stop the kubelet service so no race conditions occur when configuring it
-	klog.V(1).Infoln("[kubelet-start] Stopping the kubelet")
-	kubeletphase.TryStopKubelet()
+	if !data.DryRun() {
+		klog.V(1).Infoln("[kubelet-start] Stopping the kubelet")
+		kubeletphase.TryStopKubelet()
+	} else {
+		fmt.Println("[kubelet-start] Would stop the kubelet")
+	}
 
 	// Write the configuration for the kubelet (using the bootstrap token credentials) to disk so the kubelet can start
-	if err := kubeletphase.DownloadConfig(bootstrapClient, kubeletVersion, kubeadmconstants.KubeletRunDirectory); err != nil {
+	if err := kubeletphase.WriteConfigToDisk(&initCfg.ClusterConfiguration, data.KubeletDir(), data.PatchesDir(), data.OutputWriter()); err != nil {
 		return err
 	}
 
@@ -142,8 +184,18 @@ func runKubeletStartJoinPhase(c workflow.RunData) (returnErr error) {
 	// register the joining node with the specified taints if the node
 	// is not a control-plane. The mark-control-plane phase will register the taints otherwise.
 	registerTaintsUsingFlags := cfg.ControlPlane == nil
-	if err := kubeletphase.WriteKubeletDynamicEnvFile(&initCfg.ClusterConfiguration, &initCfg.NodeRegistration, registerTaintsUsingFlags, kubeadmconstants.KubeletRunDirectory); err != nil {
+	if err := kubeletphase.WriteKubeletDynamicEnvFile(&initCfg.ClusterConfiguration, &initCfg.NodeRegistration, registerTaintsUsingFlags, data.KubeletDir()); err != nil {
 		return err
+	}
+
+	if data.DryRun() {
+		fmt.Println("[kubelet-start] Would start the kubelet")
+		// If we're dry-running, print the kubelet config manifests and print static pod manifests if joining a control plane.
+		// TODO: think of a better place to move this call - e.g. a hidden phase.
+		if err := dryrunutil.PrintFilesIfDryRunning(cfg.ControlPlane != nil, data.ManifestDir(), data.OutputWriter()); err != nil {
+			return errors.Wrap(err, "error printing files on dryrun")
+		}
+		return nil
 	}
 
 	// Try to start the kubelet service in case it's inactive
@@ -178,7 +230,7 @@ func waitForTLSBootstrappedClient() error {
 	fmt.Println("[kubelet-start] Waiting for the kubelet to perform the TLS Bootstrap...")
 
 	// Loop on every falsy return. Return with an error if raised. Exit successfully if true is returned.
-	return wait.PollImmediate(kubeadmconstants.APICallRetryInterval, kubeadmconstants.TLSBootstrapTimeout, func() (bool, error) {
+	return wait.PollImmediate(kubeadmconstants.TLSBootstrapRetryInterval, kubeadmconstants.TLSBootstrapTimeout, func() (bool, error) {
 		// Check that we can create a client set out of the kubelet kubeconfig. This ensures not
 		// only that the kubeconfig file exists, but that other files required by it also exist (like
 		// client certificate and key)

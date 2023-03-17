@@ -17,12 +17,13 @@ limitations under the License.
 package deployment
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"testing"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	extensions "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,11 +43,11 @@ import (
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	_ "k8s.io/kubernetes/pkg/apis/policy/install"
 	_ "k8s.io/kubernetes/pkg/apis/rbac/install"
-	_ "k8s.io/kubernetes/pkg/apis/settings/install"
 	_ "k8s.io/kubernetes/pkg/apis/storage/install"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/deployment/util"
 	"k8s.io/kubernetes/pkg/controller/testutil"
+	"k8s.io/utils/pointer"
 )
 
 var (
@@ -62,7 +63,7 @@ func rs(name string, replicas int, selector map[string]string, timestamp metav1.
 			Namespace:         metav1.NamespaceDefault,
 		},
 		Spec: apps.ReplicaSetSpec{
-			Replicas: func() *int32 { i := int32(replicas); return &i }(),
+			Replicas: pointer.Int32(int32(replicas)),
 			Selector: &metav1.LabelSelector{MatchLabels: selector},
 			Template: v1.PodTemplateSpec{},
 		},
@@ -94,7 +95,7 @@ func newDeployment(name string, replicas int, revisionHistoryLimit *int32, maxSu
 					MaxSurge:       func() *intstr.IntOrString { i := intstr.FromInt(0); return &i }(),
 				},
 			},
-			Replicas: func() *int32 { i := int32(replicas); return &i }(),
+			Replicas: pointer.Int32(int32(replicas)),
 			Selector: &metav1.LabelSelector{MatchLabels: selector},
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -132,7 +133,7 @@ func newReplicaSet(d *apps.Deployment, name string, replicas int) *apps.ReplicaS
 		},
 		Spec: apps.ReplicaSetSpec{
 			Selector: d.Spec.Selector,
-			Replicas: func() *int32 { i := int32(replicas); return &i }(),
+			Replicas: pointer.Int32(int32(replicas)),
 			Template: d.Spec.Template,
 		},
 	}
@@ -222,7 +223,7 @@ func (f *fixture) run_(deploymentName string, startInformers bool, expectError b
 		informers.Start(stopCh)
 	}
 
-	err = c.syncDeployment(deploymentName)
+	err = c.syncDeployment(context.TODO(), deploymentName)
 	if !expectError && err != nil {
 		f.t.Errorf("error syncing deployment: %v", err)
 	} else if expectError && err == nil {
@@ -530,7 +531,7 @@ func TestGetReplicaSetsForDeployment(t *testing.T) {
 	defer close(stopCh)
 	informers.Start(stopCh)
 
-	rsList, err := c.getReplicaSetsForDeployment(d1)
+	rsList, err := c.getReplicaSetsForDeployment(context.TODO(), d1)
 	if err != nil {
 		t.Fatalf("getReplicaSetsForDeployment() error: %v", err)
 	}
@@ -542,7 +543,7 @@ func TestGetReplicaSetsForDeployment(t *testing.T) {
 		t.Errorf("getReplicaSetsForDeployment() = %v, want [%v]", rsNames, rs1.Name)
 	}
 
-	rsList, err = c.getReplicaSetsForDeployment(d2)
+	rsList, err = c.getReplicaSetsForDeployment(context.TODO(), d2)
 	if err != nil {
 		t.Fatalf("getReplicaSetsForDeployment() error: %v", err)
 	}
@@ -580,7 +581,7 @@ func TestGetReplicaSetsForDeploymentAdoptRelease(t *testing.T) {
 	defer close(stopCh)
 	informers.Start(stopCh)
 
-	rsList, err := c.getReplicaSetsForDeployment(d)
+	rsList, err := c.getReplicaSetsForDeployment(context.TODO(), d)
 	if err != nil {
 		t.Fatalf("getReplicaSetsForDeployment() error: %v", err)
 	}

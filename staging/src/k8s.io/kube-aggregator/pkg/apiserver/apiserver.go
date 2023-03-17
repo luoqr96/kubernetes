@@ -17,18 +17,27 @@ limitations under the License.
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/endpoints/discovery/aggregated"
+	genericfeatures "k8s.io/apiserver/pkg/features"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/egressselector"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/pkg/version"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 
+	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	v1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	v1helper "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1/helper"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
@@ -38,6 +47,8 @@ import (
 	listers "k8s.io/kube-aggregator/pkg/client/listers/apiregistration/v1"
 	openapicontroller "k8s.io/kube-aggregator/pkg/controllers/openapi"
 	openapiaggregator "k8s.io/kube-aggregator/pkg/controllers/openapi/aggregator"
+	openapiv3controller "k8s.io/kube-aggregator/pkg/controllers/openapiv3"
+	openapiv3aggregator "k8s.io/kube-aggregator/pkg/controllers/openapiv3/aggregator"
 	statuscontrollers "k8s.io/kube-aggregator/pkg/controllers/status"
 	apiservicerest "k8s.io/kube-aggregator/pkg/registry/apiservice/rest"
 )
@@ -56,15 +67,19 @@ func init() {
 	)
 }
 
-// legacyAPIServiceName is the fixed name of the only non-groupified API version
-const legacyAPIServiceName = "v1."
+const (
+	// legacyAPIServiceName is the fixed name of the only non-groupified API version
+	legacyAPIServiceName = "v1."
+	// StorageVersionPostStartHookName is the name of the storage version updater post start hook.
+	StorageVersionPostStartHookName = "built-in-resources-storage-version-updater"
+)
 
 // ExtraConfig represents APIServices-specific configuration
 type ExtraConfig struct {
 	// ProxyClientCert/Key are the client cert used to identify this proxy. Backing APIServices use
 	// this to confirm the proxy's identity
-	ProxyClientCert []byte
-	ProxyClientKey  []byte
+	ProxyClientCertFile string
+	ProxyClientKeyFile  string
 
 	// If present, the Dial method will be used for dialing out to delegate
 	// apiservers.
@@ -72,6 +87,8 @@ type ExtraConfig struct {
 
 	// Mechanism by which the Aggregator will resolve services. Required.
 	ServiceResolver ServiceResolver
+
+	RejectForwardingRedirects bool
 }
 
 // Config represents the configuration needed to create an APIAggregator.
@@ -105,13 +122,14 @@ type preparedAPIAggregator struct {
 type APIAggregator struct {
 	GenericAPIServer *genericapiserver.GenericAPIServer
 
+	// provided for easier embedding
+	APIRegistrationInformers informers.SharedInformerFactory
+
 	delegateHandler http.Handler
 
-	// proxyClientCert/Key are the client cert used to identify this proxy. Backing APIServices use
-	// this to confirm the proxy's identity
-	proxyClientCert []byte
-	proxyClientKey  []byte
-	proxyTransport  *http.Transport
+	// proxyCurrentCertKeyContent holds he client cert used to identify this proxy. Backing APIServices use this to confirm the proxy's identity
+	proxyCurrentCertKeyContent certKeyFunc
+	proxyTransport             *http.Transport
 
 	// proxyHandlers are the proxy handlers that are currently registered, keyed by apiservice.name
 	proxyHandlers map[string]*proxyHandler
@@ -122,17 +140,32 @@ type APIAggregator struct {
 	// controller state
 	lister listers.APIServiceLister
 
-	// provided for easier embedding
-	APIRegistrationInformers informers.SharedInformerFactory
-
 	// Information needed to determine routing for the aggregator
 	serviceResolver ServiceResolver
 
 	// Enable swagger and/or OpenAPI if these configs are non-nil.
 	openAPIConfig *openapicommon.Config
 
-	// openAPIAggregationController downloads and merges OpenAPI specs.
+	// Enable OpenAPI V3 if these configs are non-nil
+	openAPIV3Config *openapicommon.Config
+
+	// openAPIAggregationController downloads and merges OpenAPI v2 specs.
 	openAPIAggregationController *openapicontroller.AggregationController
+
+	// openAPIV3AggregationController downloads and caches OpenAPI v3 specs.
+	openAPIV3AggregationController *openapiv3controller.AggregationController
+
+	// discoveryAggregationController downloads and caches discovery documents
+	// from all aggregated apiservices so they are available from /apis endpoint
+	// when discovery with resources are requested
+	discoveryAggregationController DiscoveryAggregationController
+
+	// egressSelector selects the proper egress dialer to communicate with the custom apiserver
+	// overwrites proxyTransport dialer if not nil
+	egressSelector *egressselector.EgressSelector
+
+	// rejectForwardingRedirects is whether to allow to forward redirect response
+	rejectForwardingRedirects bool
 }
 
 // Complete fills in any fields not set that are required to have valid data. It's mutating the receiver.
@@ -153,11 +186,6 @@ func (cfg *Config) Complete() CompletedConfig {
 
 // NewWithDelegate returns a new instance of APIAggregator from the given config.
 func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.DelegationTarget) (*APIAggregator, error) {
-	// Prevent generic API server to install OpenAPI handler. Aggregator server
-	// has its own customized OpenAPI handler.
-	openAPIConfig := c.GenericConfig.OpenAPIConfig
-	c.GenericConfig.OpenAPIConfig = nil
-
 	genericServer, err := c.GenericConfig.New("kube-aggregator", delegationTarget)
 	if err != nil {
 		return nil, err
@@ -172,21 +200,39 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		5*time.Minute, // this is effectively used as a refresh interval right now.  Might want to do something nicer later on.
 	)
 
-	s := &APIAggregator{
-		GenericAPIServer:         genericServer,
-		delegateHandler:          delegationTarget.UnprotectedHandler(),
-		proxyClientCert:          c.ExtraConfig.ProxyClientCert,
-		proxyClientKey:           c.ExtraConfig.ProxyClientKey,
-		proxyTransport:           c.ExtraConfig.ProxyTransport,
-		proxyHandlers:            map[string]*proxyHandler{},
-		handledGroups:            sets.String{},
-		lister:                   informerFactory.Apiregistration().V1().APIServices().Lister(),
-		APIRegistrationInformers: informerFactory,
-		serviceResolver:          c.ExtraConfig.ServiceResolver,
-		openAPIConfig:            openAPIConfig,
+	// apiServiceRegistrationControllerInitiated is closed when APIServiceRegistrationController has finished "installing" all known APIServices.
+	// At this point we know that the proxy handler knows about APIServices and can handle client requests.
+	// Before it might have resulted in a 404 response which could have serious consequences for some controllers like  GC and NS
+	//
+	// Note that the APIServiceRegistrationController waits for APIServiceInformer to synced before doing its work.
+	apiServiceRegistrationControllerInitiated := make(chan struct{})
+	if err := genericServer.RegisterMuxAndDiscoveryCompleteSignal("APIServiceRegistrationControllerInitiated", apiServiceRegistrationControllerInitiated); err != nil {
+		return nil, err
 	}
 
-	apiGroupInfo := apiservicerest.NewRESTStorage(c.GenericConfig.MergedResourceConfig, c.GenericConfig.RESTOptionsGetter)
+	s := &APIAggregator{
+		GenericAPIServer:           genericServer,
+		delegateHandler:            delegationTarget.UnprotectedHandler(),
+		proxyTransport:             c.ExtraConfig.ProxyTransport,
+		proxyHandlers:              map[string]*proxyHandler{},
+		handledGroups:              sets.String{},
+		lister:                     informerFactory.Apiregistration().V1().APIServices().Lister(),
+		APIRegistrationInformers:   informerFactory,
+		serviceResolver:            c.ExtraConfig.ServiceResolver,
+		openAPIConfig:              c.GenericConfig.OpenAPIConfig,
+		openAPIV3Config:            c.GenericConfig.OpenAPIV3Config,
+		egressSelector:             c.GenericConfig.EgressSelector,
+		proxyCurrentCertKeyContent: func() (bytes []byte, bytes2 []byte) { return nil, nil },
+		rejectForwardingRedirects:  c.ExtraConfig.RejectForwardingRedirects,
+	}
+
+	// used later  to filter the served resource by those that have expired.
+	resourceExpirationEvaluator, err := genericapiserver.NewResourceExpirationEvaluator(*c.GenericConfig.Version)
+	if err != nil {
+		return nil, err
+	}
+
+	apiGroupInfo := apiservicerest.NewRESTStorage(c.GenericConfig.MergedResourceConfig, c.GenericConfig.RESTOptionsGetter, resourceExpirationEvaluator.ShouldServeForVersion(1, 22))
 	if err := s.GenericAPIServer.InstallAPIGroup(&apiGroupInfo); err != nil {
 		return nil, err
 	}
@@ -204,19 +250,55 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		lister:         s.lister,
 		discoveryGroup: discoveryGroup(enabledVersions),
 	}
-	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", apisHandler)
+
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.AggregatedDiscoveryEndpoint) {
+		apisHandlerWithAggregationSupport := aggregated.WrapAggregatedDiscoveryToHandler(apisHandler, s.GenericAPIServer.AggregatedDiscoveryGroupManager)
+		s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", apisHandlerWithAggregationSupport)
+	} else {
+		s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", apisHandler)
+	}
 	s.GenericAPIServer.Handler.NonGoRestfulMux.UnlistedHandle("/apis/", apisHandler)
 
 	apiserviceRegistrationController := NewAPIServiceRegistrationController(informerFactory.Apiregistration().V1().APIServices(), s)
+	if len(c.ExtraConfig.ProxyClientCertFile) > 0 && len(c.ExtraConfig.ProxyClientKeyFile) > 0 {
+		aggregatorProxyCerts, err := dynamiccertificates.NewDynamicServingContentFromFiles("aggregator-proxy-cert", c.ExtraConfig.ProxyClientCertFile, c.ExtraConfig.ProxyClientKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		// We are passing the context to ProxyCerts.RunOnce as it needs to implement RunOnce(ctx) however the
+		// context is not used at all. So passing a empty context shouldn't be a problem
+		ctx := context.TODO()
+		if err := aggregatorProxyCerts.RunOnce(ctx); err != nil {
+			return nil, err
+		}
+		aggregatorProxyCerts.AddListener(apiserviceRegistrationController)
+		s.proxyCurrentCertKeyContent = aggregatorProxyCerts.CurrentCertKeyContent
+
+		s.GenericAPIServer.AddPostStartHookOrDie("aggregator-reload-proxy-client-cert", func(postStartHookContext genericapiserver.PostStartHookContext) error {
+			// generate a context  from stopCh. This is to avoid modifying files which are relying on apiserver
+			// TODO: See if we can pass ctx to the current method
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				select {
+				case <-postStartHookContext.StopCh:
+					cancel() // stopCh closed, so cancel our context
+				case <-ctx.Done():
+				}
+			}()
+			go aggregatorProxyCerts.Run(ctx, 1)
+			return nil
+		})
+	}
+
 	availableController, err := statuscontrollers.NewAvailableConditionController(
 		informerFactory.Apiregistration().V1().APIServices(),
 		c.GenericConfig.SharedInformerFactory.Core().V1().Services(),
 		c.GenericConfig.SharedInformerFactory.Core().V1().Endpoints(),
 		apiregistrationClient.ApiregistrationV1(),
 		c.ExtraConfig.ProxyTransport,
-		c.ExtraConfig.ProxyClientCert,
-		c.ExtraConfig.ProxyClientKey,
+		(func() ([]byte, []byte))(s.proxyCurrentCertKeyContent),
 		s.serviceResolver,
+		c.GenericConfig.EgressSelector,
 	)
 	if err != nil {
 		return nil, err
@@ -228,25 +310,101 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		return nil
 	})
 	s.GenericAPIServer.AddPostStartHookOrDie("apiservice-registration-controller", func(context genericapiserver.PostStartHookContext) error {
-		go apiserviceRegistrationController.Run(context.StopCh)
+		go apiserviceRegistrationController.Run(context.StopCh, apiServiceRegistrationControllerInitiated)
+		select {
+		case <-context.StopCh:
+		case <-apiServiceRegistrationControllerInitiated:
+		}
+
 		return nil
 	})
 	s.GenericAPIServer.AddPostStartHookOrDie("apiservice-status-available-controller", func(context genericapiserver.PostStartHookContext) error {
-		// if we end up blocking for long periods of time, we may need to increase threadiness.
+		// if we end up blocking for long periods of time, we may need to increase workers.
 		go availableController.Run(5, context.StopCh)
 		return nil
 	})
 
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.StorageVersionAPI) &&
+		utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerIdentity) {
+		// Spawn a goroutine in aggregator apiserver to update storage version for
+		// all built-in resources
+		s.GenericAPIServer.AddPostStartHookOrDie(StorageVersionPostStartHookName, func(hookContext genericapiserver.PostStartHookContext) error {
+			// Wait for apiserver-identity to exist first before updating storage
+			// versions, to avoid storage version GC accidentally garbage-collecting
+			// storage versions.
+			kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
+			if err != nil {
+				return err
+			}
+			if err := wait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
+				_, err := kubeClient.CoordinationV1().Leases(metav1.NamespaceSystem).Get(
+					context.TODO(), s.GenericAPIServer.APIServerID, metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					return false, nil
+				}
+				if err != nil {
+					return false, err
+				}
+				return true, nil
+			}, hookContext.StopCh); err != nil {
+				return fmt.Errorf("failed to wait for apiserver-identity lease %s to be created: %v",
+					s.GenericAPIServer.APIServerID, err)
+			}
+			// Technically an apiserver only needs to update storage version once during bootstrap.
+			// Reconcile StorageVersion objects every 10 minutes will help in the case that the
+			// StorageVersion objects get accidentally modified/deleted by a different agent. In that
+			// case, the reconciliation ensures future storage migration still works. If nothing gets
+			// changed, the reconciliation update is a noop and gets short-circuited by the apiserver,
+			// therefore won't change the resource version and trigger storage migration.
+			go wait.PollImmediateUntil(10*time.Minute, func() (bool, error) {
+				// All apiservers (aggregator-apiserver, kube-apiserver, apiextensions-apiserver)
+				// share the same generic apiserver config. The same StorageVersion manager is used
+				// to register all built-in resources when the generic apiservers install APIs.
+				s.GenericAPIServer.StorageVersionManager.UpdateStorageVersions(hookContext.LoopbackClientConfig, s.GenericAPIServer.APIServerID)
+				return false, nil
+			}, hookContext.StopCh)
+			// Once the storage version updater finishes the first round of update,
+			// the PostStartHook will return to unblock /healthz. The handler chain
+			// won't block write requests anymore. Check every second since it's not
+			// expensive.
+			wait.PollImmediateUntil(1*time.Second, func() (bool, error) {
+				return s.GenericAPIServer.StorageVersionManager.Completed(), nil
+			}, hookContext.StopCh)
+			return nil
+		})
+	}
+
 	return s, nil
 }
 
-// PrepareRun prepares the aggregator to run, by setting up the OpenAPI spec and calling
-// the generic PrepareRun.
+// PrepareRun prepares the aggregator to run, by setting up the OpenAPI spec &
+// aggregated discovery document and calling the generic PrepareRun.
 func (s *APIAggregator) PrepareRun() (preparedAPIAggregator, error) {
 	// add post start hook before generic PrepareRun in order to be before /healthz installation
 	if s.openAPIConfig != nil {
 		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-openapi-controller", func(context genericapiserver.PostStartHookContext) error {
 			go s.openAPIAggregationController.Run(context.StopCh)
+			return nil
+		})
+	}
+
+	if s.openAPIV3Config != nil && utilfeature.DefaultFeatureGate.Enabled(genericfeatures.OpenAPIV3) {
+		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-openapiv3-controller", func(context genericapiserver.PostStartHookContext) error {
+			go s.openAPIV3AggregationController.Run(context.StopCh)
+			return nil
+		})
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.AggregatedDiscoveryEndpoint) {
+		s.discoveryAggregationController = NewDiscoveryManager(
+			s.GenericAPIServer.AggregatedDiscoveryGroupManager,
+		)
+
+		// Setup discovery endpoint
+		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-discovery-controller", func(context genericapiserver.PostStartHookContext) error {
+			// Run discovery manager's worker to watch for new/removed/updated
+			// APIServices to the discovery document can be updated at runtime
+			go s.discoveryAggregationController.Run(context.StopCh)
 			return nil
 		})
 	}
@@ -268,6 +426,18 @@ func (s *APIAggregator) PrepareRun() (preparedAPIAggregator, error) {
 		s.openAPIAggregationController = openapicontroller.NewAggregationController(&specDownloader, openAPIAggregator)
 	}
 
+	if s.openAPIV3Config != nil && utilfeature.DefaultFeatureGate.Enabled(genericfeatures.OpenAPIV3) {
+		specDownloaderV3 := openapiv3aggregator.NewDownloader()
+		openAPIV3Aggregator, err := openapiv3aggregator.BuildAndRegisterAggregator(
+			specDownloaderV3,
+			s.GenericAPIServer.NextDelegate(),
+			s.GenericAPIServer.Handler.NonGoRestfulMux)
+		if err != nil {
+			return preparedAPIAggregator{}, err
+		}
+		s.openAPIV3AggregationController = openapiv3controller.NewAggregationController(openAPIV3Aggregator)
+	}
+
 	return preparedAPIAggregator{APIAggregator: s, runnable: prepared}, nil
 }
 
@@ -285,6 +455,15 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 		if s.openAPIAggregationController != nil {
 			s.openAPIAggregationController.UpdateAPIService(proxyHandler, apiService)
 		}
+		if s.openAPIV3AggregationController != nil {
+			s.openAPIV3AggregationController.UpdateAPIService(proxyHandler, apiService)
+		}
+		// Forward calls to discovery manager to update discovery document
+		if s.discoveryAggregationController != nil {
+			handlerCopy := *proxyHandler
+			handlerCopy.setServiceAvailable(true)
+			s.discoveryAggregationController.AddAPIService(apiService, &handlerCopy)
+		}
 		return nil
 	}
 
@@ -296,16 +475,24 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 
 	// register the proxy handler
 	proxyHandler := &proxyHandler{
-		localDelegate:   s.delegateHandler,
-		proxyClientCert: s.proxyClientCert,
-		proxyClientKey:  s.proxyClientKey,
-		proxyTransport:  s.proxyTransport,
-		serviceResolver: s.serviceResolver,
+		localDelegate:              s.delegateHandler,
+		proxyCurrentCertKeyContent: s.proxyCurrentCertKeyContent,
+		proxyTransport:             s.proxyTransport,
+		serviceResolver:            s.serviceResolver,
+		egressSelector:             s.egressSelector,
+		rejectForwardingRedirects:  s.rejectForwardingRedirects,
 	}
 	proxyHandler.updateAPIService(apiService)
 	if s.openAPIAggregationController != nil {
 		s.openAPIAggregationController.AddAPIService(proxyHandler, apiService)
 	}
+	if s.openAPIV3AggregationController != nil {
+		s.openAPIV3AggregationController.AddAPIService(proxyHandler, apiService)
+	}
+	if s.discoveryAggregationController != nil {
+		s.discoveryAggregationController.AddAPIService(apiService, proxyHandler)
+	}
+
 	s.proxyHandlers[apiService.Name] = proxyHandler
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle(proxyPath, proxyHandler)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.UnlistedHandlePrefix(proxyPath+"/", proxyHandler)
@@ -338,6 +525,11 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 // RemoveAPIService removes the APIService from being handled.  It is not thread-safe, so only call it on one thread at a time please.
 // It's a slow moving API, so it's ok to run the controller on a single thread.
 func (s *APIAggregator) RemoveAPIService(apiServiceName string) {
+	// Forward calls to discovery manager to update discovery document
+	if s.discoveryAggregationController != nil {
+		s.discoveryAggregationController.RemoveAPIService(apiServiceName)
+	}
+
 	version := v1helper.APIServiceNameToGroupVersion(apiServiceName)
 
 	proxyPath := "/apis/" + version.Group + "/" + version.Version
@@ -348,6 +540,9 @@ func (s *APIAggregator) RemoveAPIService(apiServiceName string) {
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Unregister(proxyPath)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Unregister(proxyPath + "/")
 	if s.openAPIAggregationController != nil {
+		s.openAPIAggregationController.RemoveAPIService(apiServiceName)
+	}
+	if s.openAPIV3AggregationController != nil {
 		s.openAPIAggregationController.RemoveAPIService(apiServiceName)
 	}
 	delete(s.proxyHandlers, apiServiceName)

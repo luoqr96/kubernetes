@@ -28,7 +28,8 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
-	pkiutil "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
+
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 )
 
 // certificateReadWriter defines the behavior of a component that
@@ -81,10 +82,8 @@ func (rw *pkiCertificateReadWriter) Read() (*x509.Certificate, error) {
 		return nil, errors.Wrapf(err, "failed to load existing certificate %s", rw.baseName)
 	}
 
-	if len(certs) != 1 {
-		return nil, errors.Errorf("wanted exactly one certificate, got %d", len(certs))
-	}
-
+	// Safely pick the first one because the sender's certificate must come first in the list.
+	// For details, see: https://www.rfc-editor.org/rfc/rfc4346#section-7.4.2
 	return certs[0], nil
 }
 
@@ -104,14 +103,19 @@ type kubeConfigReadWriter struct {
 	kubeConfigFileName string
 	kubeConfigFilePath string
 	kubeConfig         *clientcmdapi.Config
+	baseName           string
+	certificateDir     string
+	caCert             *x509.Certificate
 }
 
 // newKubeconfigReadWriter return a new kubeConfigReadWriter
-func newKubeconfigReadWriter(kubernetesDir string, kubeConfigFileName string) *kubeConfigReadWriter {
+func newKubeconfigReadWriter(kubernetesDir string, kubeConfigFileName string, certificateDir, baseName string) *kubeConfigReadWriter {
 	return &kubeConfigReadWriter{
 		kubernetesDir:      kubernetesDir,
 		kubeConfigFileName: kubeConfigFileName,
 		kubeConfigFilePath: filepath.Join(kubernetesDir, kubeConfigFileName),
+		certificateDir:     certificateDir,
+		baseName:           baseName,
 	}
 }
 
@@ -130,6 +134,20 @@ func (rw *kubeConfigReadWriter) Read() (*x509.Certificate, error) {
 		return nil, errors.Wrapf(err, "failed to load kubeConfig file %s", rw.kubeConfigFilePath)
 	}
 
+	// The CA cert is required for updating kubeconfig files.
+	// For local CA renewal, the local CA on disk could have changed, thus a reload is needed.
+	// For CSR renewal we assume the same CA on disk is mounted for usage with KCM's
+	// '--cluster-signing-cert-file' flag.
+	certificatePath, _ := pkiutil.PathsForCertAndKey(rw.certificateDir, rw.baseName)
+	caCerts, err := certutil.CertsFromFile(certificatePath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to load existing certificate %s", rw.baseName)
+	}
+
+	// Safely pick the first one because the sender's certificate must come first in the list.
+	// For details, see: https://www.rfc-editor.org/rfc/rfc4346#section-7.4.2
+	rw.caCert = caCerts[0]
+
 	// get current context
 	if _, ok := kubeConfig.Contexts[kubeConfig.CurrentContext]; !ok {
 		return nil, errors.Errorf("invalid kubeConfig file %s: missing context %s", rw.kubeConfigFilePath, kubeConfig.CurrentContext)
@@ -143,7 +161,7 @@ func (rw *kubeConfigReadWriter) Read() (*x509.Certificate, error) {
 
 	cluster := kubeConfig.Clusters[clusterName]
 	if len(cluster.CertificateAuthorityData) == 0 {
-		return nil, errors.Errorf("kubeConfig file %s does not have and embedded server certificate", rw.kubeConfigFilePath)
+		return nil, errors.Errorf("kubeConfig file %s does not have an embedded server certificate", rw.kubeConfigFilePath)
 	}
 
 	// get auth info for current context and ensure a client certificate is embedded in it
@@ -154,10 +172,10 @@ func (rw *kubeConfigReadWriter) Read() (*x509.Certificate, error) {
 
 	authInfo := kubeConfig.AuthInfos[authInfoName]
 	if len(authInfo.ClientCertificateData) == 0 {
-		return nil, errors.Errorf("kubeConfig file %s does not have and embedded client certificate", rw.kubeConfigFilePath)
+		return nil, errors.Errorf("kubeConfig file %s does not have an embedded client certificate", rw.kubeConfigFilePath)
 	}
 
-	// parse the client certificate, retrive the cert config and then renew it
+	// parse the client certificate, retrieve the cert config and then renew it
 	certs, err := certutil.ParseCertsPEM(authInfo.ClientCertificateData)
 	if err != nil {
 		return nil, errors.Wrapf(err, "kubeConfig file %s does not contain a valid client certificate", rw.kubeConfigFilePath)
@@ -174,7 +192,7 @@ func (rw *kubeConfigReadWriter) Read() (*x509.Certificate, error) {
 func (rw *kubeConfigReadWriter) Write(newCert *x509.Certificate, newKey crypto.Signer) error {
 	// check if Read was called before Write
 	if rw.kubeConfig == nil {
-		return errors.Errorf("failed to Write kubeConfig file with renewd certs. It is necessary to call Read before Write")
+		return errors.Errorf("failed to Write kubeConfig file with renewed certs. It is necessary to call Read before Write")
 	}
 
 	// encodes the new key
@@ -182,6 +200,12 @@ func (rw *kubeConfigReadWriter) Write(newCert *x509.Certificate, newKey crypto.S
 	if err != nil {
 		return errors.Wrapf(err, "failed to marshal private key to PEM")
 	}
+
+	// Update the embedded CA in the kubeconfig file.
+	// This assumes that the user has kept the current context to the desired one.
+	clusterName := rw.kubeConfig.Contexts[rw.kubeConfig.CurrentContext].Cluster
+	cluster := rw.kubeConfig.Clusters[clusterName]
+	cluster.CertificateAuthorityData = pkiutil.EncodeCertPEM(rw.caCert)
 
 	// get auth info for current context and ensure a client certificate is embedded in it
 	authInfoName := rw.kubeConfig.Contexts[rw.kubeConfig.CurrentContext].AuthInfo

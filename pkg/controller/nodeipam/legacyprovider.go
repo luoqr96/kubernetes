@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -24,13 +25,13 @@ import (
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/kubernetes/pkg/controller/nodeipam/ipam"
 	nodesync "k8s.io/kubernetes/pkg/controller/nodeipam/ipam/sync"
 )
 
-func startLegacyIPAM(
+func createLegacyIPAM(
 	ic *Controller,
 	nodeInformer coreinformers.NodeInformer,
 	cloud cloudprovider.Interface,
@@ -38,7 +39,7 @@ func startLegacyIPAM(
 	clusterCIDRs []*net.IPNet,
 	serviceCIDR *net.IPNet,
 	nodeCIDRMaskSizes []int,
-) {
+) *ipam.Controller {
 	cfg := &ipam.Config{
 		Resync:       ipamResyncInterval,
 		MaxBackoff:   ipamMaxBackoff,
@@ -66,4 +67,5 @@ func startLegacyIPAM(
 	if err := ipamc.Start(nodeInformer); err != nil {
 		klog.Fatalf("Error trying to Init(): %v", err)
 	}
+	return ipamc
 }

@@ -18,11 +18,13 @@ package dynamic
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -134,7 +136,7 @@ func TestList(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).List(metav1.ListOptions{})
+		got, err := cl.Resource(resource).Namespace(tc.namespace).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			t.Errorf("unexpected error when listing %q: %v", tc.name, err)
 			continue
@@ -209,7 +211,7 @@ func TestGet(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Get(tc.name, metav1.GetOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Get(context.TODO(), tc.name, metav1.GetOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when getting %q: %v", tc.name, err)
 			continue
@@ -234,7 +236,7 @@ func TestDelete(t *testing.T) {
 		namespace     string
 		name          string
 		path          string
-		deleteOptions *metav1.DeleteOptions
+		deleteOptions metav1.DeleteOptions
 	}{
 		{
 			name: "normal_delete",
@@ -260,7 +262,7 @@ func TestDelete(t *testing.T) {
 			namespace:     "nstest",
 			name:          "namespaced_delete_with_options",
 			path:          "/apis/gtest/vtest/namespaces/nstest/rtest/namespaced_delete_with_options",
-			deleteOptions: &metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: &background},
+			deleteOptions: metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: &background},
 		},
 	}
 	for _, tc := range tcs {
@@ -274,6 +276,11 @@ func TestDelete(t *testing.T) {
 				t.Errorf("Delete(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("Delete(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
 			unstructured.UnstructuredJSONScheme.Encode(statusOK, w)
 		})
@@ -283,7 +290,7 @@ func TestDelete(t *testing.T) {
 		}
 		defer srv.Close()
 
-		err = cl.Resource(resource).Namespace(tc.namespace).Delete(tc.name, tc.deleteOptions, tc.subresource...)
+		err = cl.Resource(resource).Namespace(tc.namespace).Delete(context.TODO(), tc.name, tc.deleteOptions, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when deleting %q: %v", tc.name, err)
 			continue
@@ -322,6 +329,11 @@ func TestDeleteCollection(t *testing.T) {
 				t.Errorf("DeleteCollection(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("DeleteCollection(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
 			unstructured.UnstructuredJSONScheme.Encode(statusOK, w)
 		})
@@ -331,7 +343,7 @@ func TestDeleteCollection(t *testing.T) {
 		}
 		defer srv.Close()
 
-		err = cl.Resource(resource).Namespace(tc.namespace).DeleteCollection(nil, metav1.ListOptions{})
+		err = cl.Resource(resource).Namespace(tc.namespace).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
 		if err != nil {
 			t.Errorf("unexpected error when deleting collection %q: %v", tc.name, err)
 			continue
@@ -388,8 +400,13 @@ func TestCreate(t *testing.T) {
 				t.Errorf("Create(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("Create(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Errorf("Create(%q) unexpected error reading body: %v", tc.name, err)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -404,7 +421,7 @@ func TestCreate(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Create(tc.obj, metav1.CreateOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Create(context.TODO(), tc.obj, metav1.CreateOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when creating %q: %v", tc.name, err)
 			continue
@@ -465,8 +482,13 @@ func TestUpdate(t *testing.T) {
 				t.Errorf("Update(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("Uppdate(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Errorf("Update(%q) unexpected error reading body: %v", tc.name, err)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -481,7 +503,7 @@ func TestUpdate(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Update(tc.obj, metav1.UpdateOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Update(context.TODO(), tc.obj, metav1.UpdateOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when updating %q: %v", tc.name, err)
 			continue
@@ -550,7 +572,7 @@ func TestWatch(t *testing.T) {
 		}
 		defer srv.Close()
 
-		watcher, err := cl.Resource(resource).Namespace(tc.namespace).Watch(metav1.ListOptions{})
+		watcher, err := cl.Resource(resource).Namespace(tc.namespace).Watch(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			t.Errorf("unexpected error when watching %q: %v", tc.name, err)
 			continue
@@ -624,7 +646,7 @@ func TestPatch(t *testing.T) {
 				t.Errorf("Patch(%q) got Content-Type %s. wanted %s", tc.name, content, types.StrategicMergePatchType)
 			}
 
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Errorf("Patch(%q) unexpected error reading body: %v", tc.name, err)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -640,7 +662,7 @@ func TestPatch(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Patch(tc.name, types.StrategicMergePatchType, tc.patch, metav1.PatchOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Patch(context.TODO(), tc.name, types.StrategicMergePatchType, tc.patch, metav1.PatchOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when patching %q: %v", tc.name, err)
 			continue
@@ -649,5 +671,109 @@ func TestPatch(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("Patch(%q) want: %v\ngot: %v", tc.name, tc.want, got)
 		}
+	}
+}
+
+func TestInvalidSegments(t *testing.T) {
+	name := "bad/name"
+	namespace := "bad/namespace"
+	resource := schema.GroupVersionResource{Group: "gtest", Version: "vtest", Resource: "rtest"}
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "vtest",
+			"kind":       "vkind",
+			"metadata": map[string]interface{}{
+				"name": name,
+			},
+		},
+	}
+	cl, err := NewForConfig(&restclient.Config{
+		Host: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create config: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Namespace(namespace).Create(context.TODO(), obj, metav1.CreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Update(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Update(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).UpdateStatus(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).UpdateStatus(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	err = cl.Resource(resource).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	err = cl.Resource(resource).Namespace(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	err = cl.Resource(resource).Namespace(namespace).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Namespace(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Namespace(namespace).Watch(context.TODO(), metav1.ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Patch(context.TODO(), name, types.StrategicMergePatchType, []byte("{}"), metav1.PatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Patch(context.TODO(), name, types.StrategicMergePatchType, []byte("{}"), metav1.PatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Apply(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Apply(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).ApplyStatus(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).ApplyStatus(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
 	}
 }

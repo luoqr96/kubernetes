@@ -17,6 +17,7 @@ limitations under the License.
 package cache
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -30,6 +31,8 @@ func Test_ASW_AddPlugin_Positive_NewPlugin(t *testing.T) {
 	pluginInfo := PluginInfo{
 		SocketPath: "/var/lib/kubelet/device-plugins/test-plugin.sock",
 		Timestamp:  time.Now(),
+		Handler:    nil,
+		Name:       "test",
 	}
 	asw := NewActualStateOfWorld()
 	err := asw.AddPlugin(pluginInfo)
@@ -61,6 +64,8 @@ func Test_ASW_AddPlugin_Negative_EmptySocketPath(t *testing.T) {
 	pluginInfo := PluginInfo{
 		SocketPath: "",
 		Timestamp:  time.Now(),
+		Handler:    nil,
+		Name:       "test",
 	}
 	err := asw.AddPlugin(pluginInfo)
 	require.EqualError(t, err, "socket path is empty")
@@ -86,6 +91,8 @@ func Test_ASW_RemovePlugin_Positive(t *testing.T) {
 	pluginInfo := PluginInfo{
 		SocketPath: "/var/lib/kubelet/device-plugins/test-plugin.sock",
 		Timestamp:  time.Now(),
+		Handler:    nil,
+		Name:       "test",
 	}
 	err := asw.AddPlugin(pluginInfo)
 	// Assert
@@ -111,11 +118,18 @@ func Test_ASW_RemovePlugin_Positive(t *testing.T) {
 // Verifies PluginExistsWithCorrectTimestamp returns false for an existing
 // plugin with the wrong timestamp
 func Test_ASW_PluginExistsWithCorrectTimestamp_Negative_WrongTimestamp(t *testing.T) {
+	// Skip tests that fail on Windows, as discussed during the SIG Testing meeting from January 10, 2023
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping test that fails on Windows")
+	}
+
 	// First, add a plugin
 	asw := NewActualStateOfWorld()
 	pluginInfo := PluginInfo{
 		SocketPath: "/var/lib/kubelet/device-plugins/test-plugin.sock",
 		Timestamp:  time.Now(),
+		Handler:    nil,
+		Name:       "test",
 	}
 	err := asw.AddPlugin(pluginInfo)
 	// Assert

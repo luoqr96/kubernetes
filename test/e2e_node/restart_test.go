@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -19,33 +20,41 @@ limitations under the License.
 package e2enode
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
 
-// waitForPods waits for timeout duration, for podCount.
+type podCondition func(pod *v1.Pod) (bool, error)
+
+// waitForPodsCondition waits for `podCount` number of pods to match a specific pod condition within a timeout duration.
 // If the timeout is hit, it returns the list of currently running pods.
-func waitForPods(f *framework.Framework, podCount int, timeout time.Duration) (runningPods []*v1.Pod) {
+func waitForPodsCondition(ctx context.Context, f *framework.Framework, podCount int, timeout time.Duration, condition podCondition) (runningPods []*v1.Pod) {
 	for start := time.Now(); time.Since(start) < timeout; time.Sleep(10 * time.Second) {
-		podList, err := f.PodClient().List(metav1.ListOptions{})
+		podList, err := e2epod.NewPodClient(f).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			framework.Logf("Failed to list pods on node: %v", err)
 			continue
 		}
 
 		runningPods = []*v1.Pod{}
-		for _, pod := range podList.Items {
-			if r, err := testutils.PodRunningReady(&pod); err != nil || !r {
+		for i := range podList.Items {
+			pod := podList.Items[i]
+			if r, err := condition(&pod); err != nil || !r {
 				continue
 			}
 			runningPods = append(runningPods, &pod)
@@ -58,7 +67,7 @@ func waitForPods(f *framework.Framework, podCount int, timeout time.Duration) (r
 	return runningPods
 }
 
-var _ = framework.KubeDescribe("Restart [Serial] [Slow] [Disruptive] [NodeFeature:ContainerRuntimeRestart]", func() {
+var _ = SIGDescribe("Restart [Serial] [Slow] [Disruptive]", func() {
 	const (
 		// Saturate the node. It's not necessary that all these pods enter
 		// Running/Ready, because we don't know the number of cores in the
@@ -76,18 +85,18 @@ var _ = framework.KubeDescribe("Restart [Serial] [Slow] [Disruptive] [NodeFeatur
 	)
 
 	f := framework.NewDefaultFramework("restart-test")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	ginkgo.Context("Container Runtime", func() {
 		ginkgo.Context("Network", func() {
-			ginkgo.It("should recover from ip leak", func() {
-
+			ginkgo.It("should recover from ip leak", func(ctx context.Context) {
 				pods := newTestPods(podCount, false, imageutils.GetPauseImageName(), "restart-container-runtime-test")
 				ginkgo.By(fmt.Sprintf("Trying to create %d pods on node", len(pods)))
-				createBatchPodWithRateControl(f, pods, podCreationInterval)
-				defer deletePodsSync(f, pods)
+				createBatchPodWithRateControl(ctx, f, pods, podCreationInterval)
+				ginkgo.DeferCleanup(deletePodsSync, f, pods)
 
 				// Give the node some time to stabilize, assume pods that enter RunningReady within
 				// startTimeout fit on the node and the node is now saturated.
-				runningPods := waitForPods(f, podCount, startTimeout)
+				runningPods := waitForPodsCondition(ctx, f, podCount, startTimeout, testutils.PodRunningReadyOrSucceeded)
 				if len(runningPods) < minPods {
 					framework.Failf("Failed to start %d pods, cannot test that restarting container runtime doesn't leak IPs", minPods)
 				}
@@ -96,7 +105,7 @@ var _ = framework.KubeDescribe("Restart [Serial] [Slow] [Disruptive] [NodeFeatur
 					ginkgo.By(fmt.Sprintf("Killing container runtime iteration %d", i))
 					// Wait for container runtime to be running
 					var pid int
-					gomega.Eventually(func() error {
+					gomega.Eventually(ctx, func() error {
 						runtimePids, err := getPidsForProcess(framework.TestContext.ContainerRuntimeProcessName, framework.TestContext.ContainerRuntimePidFile)
 						if err != nil {
 							return err
@@ -111,7 +120,7 @@ var _ = framework.KubeDescribe("Restart [Serial] [Slow] [Disruptive] [NodeFeatur
 						}
 						return nil
 					}, 1*time.Minute, 2*time.Second).Should(gomega.BeNil())
-					if stdout, err := exec.Command("sudo", "kill", fmt.Sprintf("%d", pid)).CombinedOutput(); err != nil {
+					if stdout, err := exec.Command("sudo", "kill", "-SIGKILL", fmt.Sprintf("%d", pid)).CombinedOutput(); err != nil {
 						framework.Failf("Failed to kill container runtime (pid=%d): %v, stdout: %q", pid, err, string(stdout))
 					}
 					// Assume that container runtime will be restarted by systemd/supervisord etc.
@@ -119,7 +128,7 @@ var _ = framework.KubeDescribe("Restart [Serial] [Slow] [Disruptive] [NodeFeatur
 				}
 
 				ginkgo.By("Checking currently Running/Ready pods")
-				postRestartRunningPods := waitForPods(f, len(runningPods), recoverTimeout)
+				postRestartRunningPods := waitForPodsCondition(ctx, f, len(runningPods), recoverTimeout, testutils.PodRunningReadyOrSucceeded)
 				if len(postRestartRunningPods) == 0 {
 					framework.Failf("Failed to start *any* pods after container runtime restart, this might indicate an IP leak")
 				}
@@ -131,6 +140,130 @@ var _ = framework.KubeDescribe("Restart [Serial] [Slow] [Disruptive] [NodeFeatur
 				}
 				ginkgo.By(fmt.Sprintf("Container runtime restart test passed with %d pods", len(postRestartRunningPods)))
 			})
+		})
+	})
+
+	ginkgo.Context("Dbus", func() {
+		ginkgo.It("should continue to run pods after a restart", func(ctx context.Context) {
+			// Allow dbus to be restarted on ubuntu
+			err := overlayDbusConfig()
+			framework.ExpectNoError(err)
+			defer func() {
+				err := restoreDbusConfig()
+				framework.ExpectNoError(err)
+			}()
+
+			preRestartPodCount := 2
+			ginkgo.By(fmt.Sprintf("creating %d RestartAlways pods on node", preRestartPodCount))
+			restartAlwaysPods := newTestPods(preRestartPodCount, false, imageutils.GetPauseImageName(), "restart-dbus-test")
+			createBatchPodWithRateControl(ctx, f, restartAlwaysPods, podCreationInterval)
+			ginkgo.DeferCleanup(deletePodsSync, f, restartAlwaysPods)
+
+			allPods := waitForPodsCondition(ctx, f, preRestartPodCount, startTimeout, testutils.PodRunningReadyOrSucceeded)
+			if len(allPods) < preRestartPodCount {
+				framework.Failf("Failed to run sufficient restartAlways pods, got %d but expected %d", len(allPods), preRestartPodCount)
+			}
+
+			ginkgo.By("restarting dbus and systemd", func() {
+				stdout, err := exec.Command("sudo", "systemctl", "reset-failed", "dbus").CombinedOutput()
+				framework.ExpectNoError(err, "Failed to reset dbus start-limit with systemctl: %v, %s", err, string(stdout))
+
+				stdout, err = exec.Command("sudo", "systemctl", "restart", "dbus").CombinedOutput()
+				framework.ExpectNoError(err, "Failed to restart dbus with systemctl: %v, %s", err, string(stdout))
+
+				stdout, err = exec.Command("sudo", "systemctl", "daemon-reexec").CombinedOutput()
+				framework.ExpectNoError(err, "Failed to restart systemd with systemctl: %v, %s", err, string(stdout))
+			})
+
+			ginkgo.By("verifying restartAlways pods stay running", func() {
+				for start := time.Now(); time.Since(start) < startTimeout && ctx.Err() == nil; time.Sleep(10 * time.Second) {
+					postRestartRunningPods := waitForPodsCondition(ctx, f, preRestartPodCount, recoverTimeout, testutils.PodRunningReadyOrSucceeded)
+					if len(postRestartRunningPods) < preRestartPodCount {
+						framework.Failf("fewer pods are running after systemd restart, got %d but expected %d", len(postRestartRunningPods), preRestartPodCount)
+					}
+				}
+			})
+
+			ginkgo.By("verifying new pods can be started after a dbus restart")
+			postRestartPodCount := 2
+			postRestartPods := newTestPods(postRestartPodCount, false, imageutils.GetPauseImageName(), "restart-dbus-test")
+			createBatchPodWithRateControl(ctx, f, postRestartPods, podCreationInterval)
+			ginkgo.DeferCleanup(deletePodsSync, f, postRestartPods)
+
+			allPods = waitForPodsCondition(ctx, f, preRestartPodCount+postRestartPodCount, startTimeout, testutils.PodRunningReadyOrSucceeded)
+			if len(allPods) < preRestartPodCount+postRestartPodCount {
+				framework.Failf("Failed to run pods after restarting dbus, got %d but expected %d", len(allPods), preRestartPodCount+postRestartPodCount)
+			}
+		})
+	})
+
+	ginkgo.Context("Kubelet", func() {
+		ginkgo.It("should correctly account for terminated pods after restart", func(ctx context.Context) {
+			node := getLocalNode(ctx, f)
+			cpus := node.Status.Allocatable[v1.ResourceCPU]
+			numCpus := int((&cpus).Value())
+			if numCpus < 1 {
+				e2eskipper.Skipf("insufficient CPU available for kubelet restart test")
+			}
+			if numCpus > 18 {
+				// 950m * 19 = 1805 CPUs -> not enough to block the scheduling of another 950m pod
+				e2eskipper.Skipf("test will return false positives on a machine with >18 cores")
+			}
+
+			// create as many restartNever pods as there are allocatable CPU
+			// nodes; if they are not correctly accounted for as terminated
+			// later, this will fill up all node capacity
+			podCountRestartNever := numCpus
+			ginkgo.By(fmt.Sprintf("creating %d RestartNever pods on node", podCountRestartNever))
+			restartNeverPods := newTestPods(podCountRestartNever, false, imageutils.GetE2EImage(imageutils.BusyBox), "restart-kubelet-test")
+			for _, pod := range restartNeverPods {
+				pod.Spec.RestartPolicy = "Never"
+				pod.Spec.Containers[0].Command = []string{"echo", "hi"}
+				pod.Spec.Containers[0].Resources.Limits = v1.ResourceList{
+					v1.ResourceCPU: resource.MustParse("950m"), // leave a little room for other workloads
+				}
+			}
+			createBatchPodWithRateControl(ctx, f, restartNeverPods, podCreationInterval)
+			ginkgo.DeferCleanup(deletePodsSync, f, restartNeverPods)
+			completedPods := waitForPodsCondition(ctx, f, podCountRestartNever, startTimeout, testutils.PodSucceeded)
+
+			if len(completedPods) < podCountRestartNever {
+				framework.Failf("Failed to run sufficient restartNever pods, got %d but expected %d", len(completedPods), podCountRestartNever)
+			}
+
+			podCountRestartAlways := (numCpus / 2) + 1
+			ginkgo.By(fmt.Sprintf("creating %d RestartAlways pods on node", podCountRestartAlways))
+			restartAlwaysPods := newTestPods(podCountRestartAlways, false, imageutils.GetPauseImageName(), "restart-kubelet-test")
+			for _, pod := range restartAlwaysPods {
+				pod.Spec.Containers[0].Resources.Limits = v1.ResourceList{
+					v1.ResourceCPU: resource.MustParse("1"),
+				}
+			}
+			createBatchPodWithRateControl(ctx, f, restartAlwaysPods, podCreationInterval)
+			ginkgo.DeferCleanup(deletePodsSync, f, restartAlwaysPods)
+
+			numAllPods := podCountRestartNever + podCountRestartAlways
+			allPods := waitForPodsCondition(ctx, f, numAllPods, startTimeout, testutils.PodRunningReadyOrSucceeded)
+			if len(allPods) < numAllPods {
+				framework.Failf("Failed to run sufficient restartAlways pods, got %d but expected %d", len(allPods), numAllPods)
+			}
+
+			ginkgo.By("killing and restarting kubelet")
+			// We want to kill the kubelet rather than a graceful restart
+			startKubelet := stopKubelet()
+			startKubelet()
+
+			// If this test works correctly, each of these pods will exit
+			// with no issue. But if accounting breaks, pods scheduled after
+			// restart may think these old pods are consuming CPU and we
+			// will get an OutOfCpu error.
+			ginkgo.By("verifying restartNever pods succeed and restartAlways pods stay running")
+			for start := time.Now(); time.Since(start) < startTimeout && ctx.Err() == nil; time.Sleep(10 * time.Second) {
+				postRestartRunningPods := waitForPodsCondition(ctx, f, numAllPods, recoverTimeout, testutils.PodRunningReadyOrSucceeded)
+				if len(postRestartRunningPods) < numAllPods {
+					framework.Failf("less pods are running after node restart, got %d but expected %d", len(postRestartRunningPods), numAllPods)
+				}
+			}
 		})
 	})
 })

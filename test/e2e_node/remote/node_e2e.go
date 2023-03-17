@@ -21,10 +21,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/kubernetes/test/e2e_node/builder"
 	"k8s.io/kubernetes/test/e2e_node/system"
@@ -44,26 +45,26 @@ func InitNodeE2ERemote() TestSuite {
 func (n *NodeE2ERemote) SetupTestPackage(tardir, systemSpecName string) error {
 	// Build the executables
 	if err := builder.BuildGo(); err != nil {
-		return fmt.Errorf("failed to build the dependencies: %v", err)
+		return fmt.Errorf("failed to build the dependencies: %w", err)
 	}
 
 	// Make sure we can find the newly built binaries
 	buildOutputDir, err := utils.GetK8sBuildOutputDir()
 	if err != nil {
-		return fmt.Errorf("failed to locate kubernetes build output directory: %v", err)
+		return fmt.Errorf("failed to locate kubernetes build output directory: %w", err)
 	}
 
 	rootDir, err := utils.GetK8sRootDir()
 	if err != nil {
-		return fmt.Errorf("failed to locate kubernetes root directory: %v", err)
+		return fmt.Errorf("failed to locate kubernetes root directory: %w", err)
 	}
 
 	// Copy binaries
-	requiredBins := []string{"kubelet", "e2e_node.test", "ginkgo", "mounter"}
+	requiredBins := []string{"kubelet", "e2e_node.test", "ginkgo", "mounter", "gcp-credential-provider"}
 	for _, bin := range requiredBins {
 		source := filepath.Join(buildOutputDir, bin)
 		if _, err := os.Stat(source); err != nil {
-			return fmt.Errorf("failed to locate test binary %s: %v", bin, err)
+			return fmt.Errorf("failed to locate test binary %s: %w", bin, err)
 		}
 		out, err := exec.Command("cp", source, filepath.Join(tardir, bin)).CombinedOutput()
 		if err != nil {
@@ -75,7 +76,7 @@ func (n *NodeE2ERemote) SetupTestPackage(tardir, systemSpecName string) error {
 		// Copy system spec file
 		source := filepath.Join(rootDir, system.SystemSpecPath, systemSpecName+".yaml")
 		if _, err := os.Stat(source); err != nil {
-			return fmt.Errorf("failed to locate system spec %q: %v", source, err)
+			return fmt.Errorf("failed to locate system spec %q: %w", source, err)
 		}
 		out, err := exec.Command("cp", source, tardir).CombinedOutput()
 		if err != nil {
@@ -98,28 +99,74 @@ func prependCOSMounterFlag(args, host, workspace string) (string, error) {
 // prependMemcgNotificationFlag prepends the flag for enabling memcg
 // notification to args and returns the result.
 func prependMemcgNotificationFlag(args string) string {
-	return "--kubelet-flags=--experimental-kernel-memcg-notification=true " + args
+	return "--kubelet-flags=--kernel-memcg-notification=true " + args
 }
 
-// updateOSSpecificKubeletFlags updates the Kubelet args with OS specific
-// settings.
-func updateOSSpecificKubeletFlags(args, host, workspace string) (string, error) {
-	output, err := SSH(host, "cat", "/etc/os-release")
+// prependGCPCredentialProviderFlag prepends the flags for enabling
+// a credential provider plugin.
+func prependGCPCredentialProviderFlag(args, workspace string) string {
+	credentialProviderConfig := filepath.Join(workspace, "credential-provider.yaml")
+	featureGateFlag := "--kubelet-flags=--feature-gates=DisableKubeletCloudCredentialProviders=true,KubeletCredentialProviders=true"
+	configFlag := fmt.Sprintf("--kubelet-flags=--image-credential-provider-config=%s", credentialProviderConfig)
+	binFlag := fmt.Sprintf("--kubelet-flags=--image-credential-provider-bin-dir=%s", workspace)
+	return fmt.Sprintf("%s %s %s %s", featureGateFlag, configFlag, binFlag, args)
+}
+
+// osSpecificActions takes OS specific actions required for the node tests
+func osSpecificActions(args, host, workspace string) (string, error) {
+	output, err := getOSDistribution(host)
 	if err != nil {
 		return "", fmt.Errorf("issue detecting node's OS via node's /etc/os-release. Err: %v, Output:\n%s", err, output)
 	}
 	switch {
-	case strings.Contains(output, "ID=gci"), strings.Contains(output, "ID=cos"):
+	case strings.Contains(output, "fedora"), strings.Contains(output, "rhcos"),
+		strings.Contains(output, "centos"), strings.Contains(output, "rhel"):
+		return args, setKubeletSELinuxLabels(host, workspace)
+	case strings.Contains(output, "gci"), strings.Contains(output, "cos"):
 		args = prependMemcgNotificationFlag(args)
+		args = prependGCPCredentialProviderFlag(args, workspace)
 		return prependCOSMounterFlag(args, host, workspace)
-	case strings.Contains(output, "ID=ubuntu"):
+	case strings.Contains(output, "ubuntu"):
+		args = prependGCPCredentialProviderFlag(args, workspace)
 		return prependMemcgNotificationFlag(args), nil
 	}
 	return args, nil
 }
 
+// setKubeletSELinuxLabels set the appropriate SELinux labels for the
+// kubelet on Fedora CoreOS distribution
+func setKubeletSELinuxLabels(host, workspace string) error {
+	cmd := getSSHCommand(" && ",
+		fmt.Sprintf("/usr/bin/chcon -u system_u -r object_r -t bin_t %s", filepath.Join(workspace, "kubelet")),
+		fmt.Sprintf("/usr/bin/chcon -u system_u -r object_r -t bin_t %s", filepath.Join(workspace, "e2e_node.test")),
+		fmt.Sprintf("/usr/bin/chcon -u system_u -r object_r -t bin_t %s", filepath.Join(workspace, "ginkgo")),
+		fmt.Sprintf("/usr/bin/chcon -u system_u -r object_r -t bin_t %s", filepath.Join(workspace, "mounter")),
+		fmt.Sprintf("/usr/bin/chcon -R -u system_u -r object_r -t bin_t %s", filepath.Join(workspace, "cni", "bin/")),
+	)
+	output, err := SSH(host, "sh", "-c", cmd)
+	if err != nil {
+		return fmt.Errorf("Unable to apply SELinux labels. Err: %v, Output:\n%s", err, output)
+	}
+	return nil
+}
+
+func getOSDistribution(host string) (string, error) {
+	output, err := SSH(host, "cat", "/etc/os-release")
+	if err != nil {
+		return "", fmt.Errorf("issue detecting node's OS via node's /etc/os-release. Err: %v, Output:\n%s", err, output)
+	}
+
+	var re = regexp.MustCompile(`(?m)^ID="?(\w+)"?`)
+	subMatch := re.FindStringSubmatch(output)
+	if len(subMatch) > 0 {
+		return subMatch[1], nil
+	}
+
+	return "", fmt.Errorf("Unable to parse os-release for the host, %s", host)
+}
+
 // RunTest runs test on the node.
-func (n *NodeE2ERemote) RunTest(host, workspace, results, imageDesc, junitFilePrefix, testArgs, ginkgoArgs, systemSpecName, extraEnvs string, timeout time.Duration) (string, error) {
+func (n *NodeE2ERemote) RunTest(host, workspace, results, imageDesc, junitFilePrefix, testArgs, ginkgoArgs, systemSpecName, extraEnvs, runtimeConfig string, timeout time.Duration) (string, error) {
 	// Install the cni plugins and add a basic CNI configuration.
 	// TODO(random-liu): Do this in cloud init after we remove containervm test.
 	if err := setupCNI(host, workspace); err != nil {
@@ -131,10 +178,15 @@ func (n *NodeE2ERemote) RunTest(host, workspace, results, imageDesc, junitFilePr
 		return "", err
 	}
 
+	// Install the kubelet credential provider plugin
+	if err := configureCredentialProvider(host, workspace); err != nil {
+		return "", err
+	}
+
 	// Kill any running node processes
 	cleanupNodeProcesses(host)
 
-	testArgs, err := updateOSSpecificKubeletFlags(testArgs, host, workspace)
+	testArgs, err := osSpecificActions(testArgs, host, workspace)
 	if err != nil {
 		return "", err
 	}
@@ -148,8 +200,8 @@ func (n *NodeE2ERemote) RunTest(host, workspace, results, imageDesc, junitFilePr
 	klog.V(2).Infof("Starting tests on %q", host)
 	cmd := getSSHCommand(" && ",
 		fmt.Sprintf("cd %s", workspace),
-		fmt.Sprintf("timeout -k 30s %fs ./ginkgo %s ./e2e_node.test -- --system-spec-name=%s --system-spec-file=%s --extra-envs=%s --logtostderr --v 4 --node-name=%s --report-dir=%s --report-prefix=%s --image-description=\"%s\" %s",
-			timeout.Seconds(), ginkgoArgs, systemSpecName, systemSpecFile, extraEnvs, host, results, junitFilePrefix, imageDesc, testArgs),
+		fmt.Sprintf("timeout -k 30s %fs ./ginkgo %s ./e2e_node.test -- --system-spec-name=%s --system-spec-file=%s --extra-envs=%s --runtime-config=%s --v 4 --node-name=%s --report-dir=%s --report-prefix=%s --image-description=\"%s\" %s",
+			timeout.Seconds(), ginkgoArgs, systemSpecName, systemSpecFile, extraEnvs, runtimeConfig, host, results, junitFilePrefix, imageDesc, testArgs),
 	)
 	return SSH(host, "sh", "-c", cmd)
 }

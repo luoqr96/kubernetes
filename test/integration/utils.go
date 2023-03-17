@@ -17,6 +17,7 @@ limitations under the License.
 package integration
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -28,19 +29,19 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/pkg/transport"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // DeletePodOrErrorf deletes a pod or fails with a call to t.Errorf.
 func DeletePodOrErrorf(t *testing.T, c clientset.Interface, ns, name string) {
-	if err := c.CoreV1().Pods(ns).Delete(name, nil); err != nil {
+	if err := c.CoreV1().Pods(ns).Delete(context.TODO(), name, metav1.DeleteOptions{}); err != nil {
 		t.Errorf("unable to delete pod %v: %v", name, err)
 	}
 }
 
 // Requests to try.  Each one should be forbidden or not forbidden
-// depending on the authentication and authorization setup of the master.
+// depending on the authentication and authorization setup of the API server.
 var (
 	Code200 = map[int]bool{200: true}
 	Code201 = map[int]bool{201: true}
@@ -49,16 +50,13 @@ var (
 	Code403 = map[int]bool{403: true}
 	Code404 = map[int]bool{404: true}
 	Code405 = map[int]bool{405: true}
-	Code409 = map[int]bool{409: true}
-	Code422 = map[int]bool{422: true}
-	Code500 = map[int]bool{500: true}
 	Code503 = map[int]bool{503: true}
 )
 
 // WaitForPodToDisappear polls the API server if the pod has been deleted.
 func WaitForPodToDisappear(podClient coreclient.PodInterface, podName string, interval, timeout time.Duration) error {
 	return wait.PollImmediate(interval, timeout, func() (bool, error) {
-		_, err := podClient.Get(podName, metav1.GetOptions{})
+		_, err := podClient.Get(context.TODO(), podName, metav1.GetOptions{})
 		if err == nil {
 			return false, nil
 		}

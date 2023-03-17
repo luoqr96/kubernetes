@@ -85,6 +85,11 @@ type ConfigFile struct {
 		DefaultDatastore string `gcfg:"default-datastore"`
 		ResourcePoolPath string `gcfg:"resourcepool-path"`
 	}
+	// Tag categories and tags which correspond to "built-in node labels: zones and region"
+	Labels struct {
+		Zone   string `gcfg:"zone"`
+		Region string `gcfg:"region"`
+	}
 }
 
 // GetVSphereInstances parses vsphere.conf and returns VSphere instances
@@ -99,7 +104,7 @@ func GetVSphereInstances() (map[string]*VSphere, error) {
 func getConfig() (*ConfigFile, error) {
 	if confFileLocation == "" {
 		if framework.TestContext.CloudConfig.ConfigFile == "" {
-			return nil, fmt.Errorf("Env variable 'VSPHERE_CONF_FILE' is not set, and no config-file specified")
+			return nil, fmt.Errorf("env variable 'VSPHERE_CONF_FILE' is not set, and no config-file specified")
 		}
 		confFileLocation = framework.TestContext.CloudConfig.ConfigFile
 	}
@@ -179,6 +184,6 @@ func populateInstanceMap(cfg *ConfigFile) (map[string]*VSphere, error) {
 		vsphereInstances[vcServer] = &vsphereIns
 	}
 
-	framework.Logf("ConfigFile %v \n vSphere instances %v", cfg, vsphereInstances)
+	framework.Logf("vSphere instances: %v", vsphereInstances)
 	return vsphereInstances, nil
 }

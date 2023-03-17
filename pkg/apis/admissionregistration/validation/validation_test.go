@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kubernetes/pkg/apis/admissionregistration"
 )
 
@@ -46,6 +45,7 @@ func newValidatingWebhookConfiguration(hooks []admissionregistration.ValidatingW
 }
 
 func TestValidateValidatingWebhookConfiguration(t *testing.T) {
+	noSideEffect := admissionregistration.SideEffectClassNone
 	unknownSideEffect := admissionregistration.SideEffectClassUnknown
 	validClientConfig := admissionregistration.WebhookClientConfig{
 		URL: strPtr("https://example.com"),
@@ -53,7 +53,6 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 	tests := []struct {
 		name          string
 		config        *admissionregistration.ValidatingWebhookConfiguration
-		gv            schema.GroupVersion
 		expectedError string
 	}{
 		{
@@ -83,11 +82,10 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:                    "webhook.k8s.io",
 					ClientConfig:            validClientConfig,
-					SideEffects:             &unknownSideEffect,
+					SideEffects:             &noSideEffect,
 					AdmissionReviewVersions: []string{"v1beta1"},
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -96,11 +94,10 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:                    "webhook.k8s.io",
 					ClientConfig:            validClientConfig,
-					SideEffects:             &unknownSideEffect,
+					SideEffects:             &noSideEffect,
 					AdmissionReviewVersions: []string{"v1beta1", "invalid-version"},
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -131,24 +128,23 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:         "webhook.k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 				},
 				{
 					Name:         "k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 				},
 				{
 					Name:         "",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: `webhooks[1].name: Invalid value: "k8s.io": should be a domain with at least three segments separated by dots, webhooks[2].name: Required value`,
 		},
 		{
-			name: "Webhooks must have unique names when not created via v1beta1",
+			name: "Webhooks must have unique names when created",
 			config: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
 				{
 					Name:         "webhook.k8s.io",
@@ -161,25 +157,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					SideEffects:  &unknownSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "foo", Version: "bar"},
 			expectedError: `webhooks[1].name: Duplicate value: "webhook.k8s.io"`,
-		},
-		{
-			name: "Webhooks can have duplicate names when created via v1beta1",
-			config: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
-			expectedError: ``,
 		},
 		{
 			name: "Operations must not be empty or nil",
@@ -271,7 +249,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:         "webhook.k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 					Rules: []admissionregistration.RuleWithOperations{
 						{
 							Operations: []admissionregistration.OperationType{"CREATE"},
@@ -284,7 +262,6 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			gv: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 		},
 		{
 			name: `resource "*" cannot mix with resources that don't have subresources`,
@@ -334,7 +311,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:         "webhook.k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 					Rules: []admissionregistration.RuleWithOperations{
 						{
 							Operations: []admissionregistration.OperationType{"CREATE"},
@@ -347,7 +324,6 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			gv: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 		},
 		{
 			name: "resource */a cannot mix with x/a",
@@ -429,7 +405,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 			expectedError: `webhooks[0].sideEffects: Required value: must specify one of None, NoneOnDryRun`,
 		},
 		{
-			name: "SideEffects can only be \"Unknown\", \"None\", \"Some\", or \"NoneOnDryRun\" via v1beta1",
+			name: "SideEffects can only be \"None\" or \"NoneOnDryRun\" when created",
 			config: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
 				{
 					Name:         "webhook.k8s.io",
@@ -440,22 +416,6 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					}(),
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
-			expectedError: `webhooks[0].sideEffects: Unsupported value: "other": supported values: "None", "NoneOnDryRun", "Some", "Unknown"`,
-		},
-		{
-			name: "SideEffects can only be \"None\" or \"NoneOnDryRun\" via v1",
-			config: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects: func() *admissionregistration.SideEffectClass {
-						r := admissionregistration.SideEffectClass("other")
-						return &r
-					}(),
-				},
-			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1"},
 			expectedError: `webhooks[0].sideEffects: Unsupported value: "other": supported values: "None", "NoneOnDryRun"`,
 		},
 		{
@@ -495,7 +455,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			expectedError: `[0].clientConfig.url: Invalid value: "": host must be provided`,
+			expectedError: `[0].clientConfig.url: Invalid value: "": host must be specified`,
 		},
 		{
 			name: "wrong scheme",
@@ -519,7 +479,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			expectedError: `host must be provided`,
+			expectedError: `host must be specified`,
 		},
 		{
 			name: "fragment",
@@ -567,7 +527,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			expectedError: `host must be provided`,
+			expectedError: `host must be specified`,
 		},
 		{
 			name: "path must start with slash",
@@ -599,10 +559,9 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 							Port:      443,
 						},
 					},
-					SideEffects: &unknownSideEffect,
+					SideEffects: &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -618,10 +577,9 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 							Port:      443,
 						},
 					},
-					SideEffects: &unknownSideEffect,
+					SideEffects: &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -637,7 +595,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 							Port:      443,
 						},
 					},
-					SideEffects: &unknownSideEffect,
+					SideEffects: &noSideEffect,
 				},
 			}, true),
 			expectedError: `clientConfig.service.path: Invalid value: "//": segment[0] may not be empty`,
@@ -693,7 +651,7 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 					SideEffects: &unknownSideEffect,
 				},
 			}, true),
-			expectedError: `clientConfig.service.path: Invalid value: "/apis/foo.bar/v1alpha1/--bad": segment[3]: a DNS-1123 subdomain`,
+			expectedError: `clientConfig.service.path: Invalid value: "/apis/foo.bar/v1alpha1/--bad": segment[3]: a lowercase RFC 1123 subdomain`,
 		},
 		{
 			name: "invalid port 0",
@@ -775,36 +733,35 @@ func TestValidateValidatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:           "webhook.k8s.io",
 					ClientConfig:   validClientConfig,
-					SideEffects:    &unknownSideEffect,
+					SideEffects:    &noSideEffect,
 					TimeoutSeconds: int32Ptr(1),
 				},
 				{
 					Name:           "webhook2.k8s.io",
 					ClientConfig:   validClientConfig,
-					SideEffects:    &unknownSideEffect,
+					SideEffects:    &noSideEffect,
 					TimeoutSeconds: int32Ptr(15),
 				},
 				{
 					Name:           "webhook3.k8s.io",
 					ClientConfig:   validClientConfig,
-					SideEffects:    &unknownSideEffect,
+					SideEffects:    &noSideEffect,
 					TimeoutSeconds: int32Ptr(30),
 				},
 			}, true),
-			gv: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			errs := ValidateValidatingWebhookConfiguration(test.config, test.gv)
+			errs := ValidateValidatingWebhookConfiguration(test.config)
 			err := errs.ToAggregate()
 			if err != nil {
 				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
-					t.Errorf("expected to contain %s, got %s", e, a)
+					t.Errorf("expected to contain:\n  %s\ngot:\n  %s", e, a)
 				}
 			} else {
 				if test.expectedError != "" {
-					t.Errorf("unexpected no error, expected to contain %s", test.expectedError)
+					t.Errorf("unexpected no error, expected to contain:\n  %s", test.expectedError)
 				}
 			}
 		})
@@ -821,7 +778,6 @@ func TestValidateValidatingWebhookConfigurationUpdate(t *testing.T) {
 		name          string
 		oldconfig     *admissionregistration.ValidatingWebhookConfiguration
 		config        *admissionregistration.ValidatingWebhookConfiguration
-		gv            schema.GroupVersion
 		expectedError string
 	}{
 		{
@@ -903,7 +859,7 @@ func TestValidateValidatingWebhookConfigurationUpdate(t *testing.T) {
 			expectedError: `Invalid value: []string{"invalid-v1"}`,
 		},
 		{
-			name: "Webhooks must have unique names when not updated via v1beta1",
+			name: "Webhooks must have unique names when old config has unique names",
 			config: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
 				{
 					Name:         "webhook.k8s.io",
@@ -923,7 +879,6 @@ func TestValidateValidatingWebhookConfigurationUpdate(t *testing.T) {
 					SideEffects:  &unknownSideEffect,
 				},
 			}, false),
-			gv:            schema.GroupVersion{Group: "foo", Version: "bar"},
 			expectedError: `webhooks[1].name: Duplicate value: "webhook.k8s.io"`,
 		},
 		{
@@ -952,45 +907,20 @@ func TestValidateValidatingWebhookConfigurationUpdate(t *testing.T) {
 					SideEffects:  &unknownSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "foo", Version: "bar"},
-			expectedError: ``,
-		},
-		{
-			name: "Webhooks can have duplicate names when updated via v1beta1",
-			config: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, true),
-			oldconfig: newValidatingWebhookConfiguration([]admissionregistration.ValidatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, false),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			errs := ValidateValidatingWebhookConfigurationUpdate(test.config, test.oldconfig, test.gv)
+			errs := ValidateValidatingWebhookConfigurationUpdate(test.config, test.oldconfig)
 			err := errs.ToAggregate()
 			if err != nil {
 				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
-					t.Errorf("expected to contain %s, got %s", e, a)
+					t.Errorf("expected to contain:\n  %s\ngot:\n  %s", e, a)
 				}
 			} else {
 				if test.expectedError != "" {
-					t.Errorf("unexpected no error, expected to contain %s", test.expectedError)
+					t.Errorf("unexpected no error, expected to contain:\n  %s", test.expectedError)
 				}
 			}
 		})
@@ -1015,6 +945,7 @@ func newMutatingWebhookConfiguration(hooks []admissionregistration.MutatingWebho
 }
 
 func TestValidateMutatingWebhookConfiguration(t *testing.T) {
+	noSideEffect := admissionregistration.SideEffectClassNone
 	unknownSideEffect := admissionregistration.SideEffectClassUnknown
 	validClientConfig := admissionregistration.WebhookClientConfig{
 		URL: strPtr("https://example.com"),
@@ -1022,7 +953,6 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 	tests := []struct {
 		name          string
 		config        *admissionregistration.MutatingWebhookConfiguration
-		gv            schema.GroupVersion
 		expectedError string
 	}{
 		{
@@ -1052,11 +982,10 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:                    "webhook.k8s.io",
 					ClientConfig:            validClientConfig,
-					SideEffects:             &unknownSideEffect,
+					SideEffects:             &noSideEffect,
 					AdmissionReviewVersions: []string{"v1beta1"},
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -1065,11 +994,10 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:                    "webhook.k8s.io",
 					ClientConfig:            validClientConfig,
-					SideEffects:             &unknownSideEffect,
+					SideEffects:             &noSideEffect,
 					AdmissionReviewVersions: []string{"v1beta1", "invalid-version"},
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -1100,24 +1028,23 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:         "webhook.k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 				},
 				{
 					Name:         "k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 				},
 				{
 					Name:         "",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: `webhooks[1].name: Invalid value: "k8s.io": should be a domain with at least three segments separated by dots, webhooks[2].name: Required value`,
 		},
 		{
-			name: "Webhooks must have unique names when not created via v1beta1",
+			name: "Webhooks must have unique names when created",
 			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
 				{
 					Name:         "webhook.k8s.io",
@@ -1130,25 +1057,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					SideEffects:  &unknownSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "foo", Version: "bar"},
 			expectedError: `webhooks[1].name: Duplicate value: "webhook.k8s.io"`,
-		},
-		{
-			name: "Webhooks can have duplicate names when created via v1beta1",
-			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
-			expectedError: ``,
 		},
 		{
 			name: "Operations must not be empty or nil",
@@ -1240,7 +1149,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:         "webhook.k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 					Rules: []admissionregistration.RuleWithOperations{
 						{
 							Operations: []admissionregistration.OperationType{"CREATE"},
@@ -1253,7 +1162,6 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			gv: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 		},
 		{
 			name: `resource "*" cannot mix with resources that don't have subresources`,
@@ -1303,7 +1211,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:         "webhook.k8s.io",
 					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
+					SideEffects:  &noSideEffect,
 					Rules: []admissionregistration.RuleWithOperations{
 						{
 							Operations: []admissionregistration.OperationType{"CREATE"},
@@ -1316,7 +1224,6 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			gv: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 		},
 		{
 			name: "resource */a cannot mix with x/a",
@@ -1398,7 +1305,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 			expectedError: `webhooks[0].sideEffects: Required value: must specify one of None, NoneOnDryRun`,
 		},
 		{
-			name: "SideEffects can only be \"Unknown\", \"None\", \"Some\", or \"NoneOnDryRun\" via v1beta1",
+			name: "SideEffects can only be \"None\" or \"NoneOnDryRun\" when created",
 			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
 				{
 					Name:         "webhook.k8s.io",
@@ -1409,22 +1316,6 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					}(),
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
-			expectedError: `webhooks[0].sideEffects: Unsupported value: "other": supported values: "None", "NoneOnDryRun", "Some", "Unknown"`,
-		},
-		{
-			name: "SideEffects can only be \"None\" or \"NoneOnDryRun\" via v1",
-			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects: func() *admissionregistration.SideEffectClass {
-						r := admissionregistration.SideEffectClass("other")
-						return &r
-					}(),
-				},
-			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1"},
 			expectedError: `webhooks[0].sideEffects: Unsupported value: "other": supported values: "None", "NoneOnDryRun"`,
 		},
 		{
@@ -1464,7 +1355,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			expectedError: `[0].clientConfig.url: Invalid value: "": host must be provided`,
+			expectedError: `[0].clientConfig.url: Invalid value: "": host must be specified`,
 		},
 		{
 			name: "wrong scheme",
@@ -1488,7 +1379,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			expectedError: `host must be provided`,
+			expectedError: `host must be specified`,
 		},
 		{
 			name: "fragment",
@@ -1536,7 +1427,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					},
 				},
 			}, true),
-			expectedError: `host must be provided`,
+			expectedError: `host must be specified`,
 		},
 		{
 			name: "path must start with slash",
@@ -1568,10 +1459,9 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 							Port:      443,
 						},
 					},
-					SideEffects: &unknownSideEffect,
+					SideEffects: &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -1587,10 +1477,9 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 							Port:      443,
 						},
 					},
-					SideEffects: &unknownSideEffect,
+					SideEffects: &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 		{
@@ -1606,7 +1495,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 							Port:      443,
 						},
 					},
-					SideEffects: &unknownSideEffect,
+					SideEffects: &noSideEffect,
 				},
 			}, true),
 			expectedError: `clientConfig.service.path: Invalid value: "//": segment[0] may not be empty`,
@@ -1662,7 +1551,7 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 					SideEffects: &unknownSideEffect,
 				},
 			}, true),
-			expectedError: `clientConfig.service.path: Invalid value: "/apis/foo.bar/v1alpha1/--bad": segment[3]: a DNS-1123 subdomain`,
+			expectedError: `clientConfig.service.path: Invalid value: "/apis/foo.bar/v1alpha1/--bad": segment[3]: a lowercase RFC 1123 subdomain`,
 		},
 		{
 			name: "invalid port 0",
@@ -1744,36 +1633,35 @@ func TestValidateMutatingWebhookConfiguration(t *testing.T) {
 				{
 					Name:           "webhook.k8s.io",
 					ClientConfig:   validClientConfig,
-					SideEffects:    &unknownSideEffect,
+					SideEffects:    &noSideEffect,
 					TimeoutSeconds: int32Ptr(1),
 				},
 				{
 					Name:           "webhook2.k8s.io",
 					ClientConfig:   validClientConfig,
-					SideEffects:    &unknownSideEffect,
+					SideEffects:    &noSideEffect,
 					TimeoutSeconds: int32Ptr(15),
 				},
 				{
 					Name:           "webhook3.k8s.io",
 					ClientConfig:   validClientConfig,
-					SideEffects:    &unknownSideEffect,
+					SideEffects:    &noSideEffect,
 					TimeoutSeconds: int32Ptr(30),
 				},
 			}, true),
-			gv: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			errs := ValidateMutatingWebhookConfiguration(test.config, test.gv)
+			errs := ValidateMutatingWebhookConfiguration(test.config)
 			err := errs.ToAggregate()
 			if err != nil {
 				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
-					t.Errorf("expected to contain %s, got %s", e, a)
+					t.Errorf("expected to contain:\n  %s\ngot:\n  %s", e, a)
 				}
 			} else {
 				if test.expectedError != "" {
-					t.Errorf("unexpected no error, expected to contain %s", test.expectedError)
+					t.Errorf("unexpected no error, expected to contain:\n  %s", test.expectedError)
 				}
 			}
 		})
@@ -1791,7 +1679,6 @@ func TestValidateMutatingWebhookConfigurationUpdate(t *testing.T) {
 		name          string
 		oldconfig     *admissionregistration.MutatingWebhookConfiguration
 		config        *admissionregistration.MutatingWebhookConfiguration
-		gv            schema.GroupVersion
 		expectedError string
 	}{
 		{
@@ -1917,35 +1804,10 @@ func TestValidateMutatingWebhookConfigurationUpdate(t *testing.T) {
 					SideEffects:  &unknownSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "foo", Version: "bar"},
 			expectedError: ``,
 		},
 		{
-			name: "Webhooks can have duplicate names when updated via v1beta1",
-			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, true),
-			oldconfig: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, false),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
-			expectedError: ``,
-		},
-		{
-			name: "Webhooks can't have side effects when old config has no side effects via v1",
+			name: "Webhooks can't have side effects when old config has no side effects",
 			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
 				{
 					Name:         "webhook.k8s.io",
@@ -1960,7 +1822,6 @@ func TestValidateMutatingWebhookConfigurationUpdate(t *testing.T) {
 					SideEffects:  &noSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1"},
 			expectedError: `Unsupported value: "Unknown": supported values: "None", "NoneOnDryRun"`,
 		},
 		{
@@ -1979,32 +1840,1425 @@ func TestValidateMutatingWebhookConfigurationUpdate(t *testing.T) {
 					SideEffects:  &unknownSideEffect,
 				},
 			}, true),
-			gv:            schema.GroupVersion{Group: "foo", Version: "bar"},
-			expectedError: ``,
-		},
-		{
-			name: "Webhooks can have side effects when updated via v1beta1",
-			config: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &unknownSideEffect,
-				},
-			}, true),
-			oldconfig: newMutatingWebhookConfiguration([]admissionregistration.MutatingWebhook{
-				{
-					Name:         "webhook.k8s.io",
-					ClientConfig: validClientConfig,
-					SideEffects:  &noSideEffect,
-				},
-			}, false),
-			gv:            schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
 			expectedError: ``,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			errs := ValidateMutatingWebhookConfigurationUpdate(test.config, test.oldconfig, test.gv)
+			errs := ValidateMutatingWebhookConfigurationUpdate(test.config, test.oldconfig)
+			err := errs.ToAggregate()
+			if err != nil {
+				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
+					t.Errorf("expected to contain:\n  %s\ngot:\n  %s", e, a)
+				}
+			} else {
+				if test.expectedError != "" {
+					t.Errorf("unexpected no error, expected to contain:\n  %s", test.expectedError)
+				}
+			}
+		})
+
+	}
+}
+
+func TestValidateValidatingAdmissionPolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        *admissionregistration.ValidatingAdmissionPolicy
+		expectedError string
+	}{
+		{
+			name: "metadata.name validation",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "!!!!",
+				},
+			},
+			expectedError: `metadata.name: Invalid value: "!!!!":`,
+		},
+		{
+			name: "failure policy validation",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("other")
+						return &r
+					}(),
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+				},
+			},
+			expectedError: `spec.failurePolicy: Unsupported value: "other": supported values: "Fail", "Ignore"`,
+		},
+		{
+			name: "failure policy validation",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("other")
+						return &r
+					}(),
+				},
+			},
+			expectedError: `spec.failurePolicy: Unsupported value: "other": supported values: "Fail", "Ignore"`,
+		},
+		{
+			name: "API version is required in ParamKind",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					ParamKind: &admissionregistration.ParamKind{
+						Kind:       "Example",
+						APIVersion: "test.example.com",
+					},
+				},
+			},
+			expectedError: `spec.paramKind.apiVersion: Invalid value: "test.example.com"`,
+		},
+		{
+			name: "API kind is required in ParamKind",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					ParamKind: &admissionregistration.ParamKind{
+						APIVersion: "test.example.com/v1",
+					},
+				},
+			},
+			expectedError: `spec.paramKind.kind: Required value`,
+		},
+		{
+			name: "API version format in ParamKind",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					ParamKind: &admissionregistration.ParamKind{
+						Kind:       "Example",
+						APIVersion: "test.example.com/!!!",
+					},
+				},
+			},
+			expectedError: `pec.paramKind.apiVersion: Invalid value: "!!!":`,
+		},
+		{
+			name: "API group format in ParamKind",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					ParamKind: &admissionregistration.ParamKind{
+						APIVersion: "!!!/v1",
+						Kind:       "ReplicaLimit",
+					},
+				},
+			},
+			expectedError: `pec.paramKind.apiVersion: Invalid value: "!!!":`,
+		},
+		{
+			name: "Validations is required",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{},
+			},
+
+			expectedError: `spec.validations: Required value`,
+		},
+		{
+			name: "Invalid Validations Reason",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+							Reason: func() *metav1.StatusReason {
+								r := metav1.StatusReason("other")
+								return &r
+							}(),
+						},
+					},
+				},
+			},
+
+			expectedError: `spec.validations[0].reason: Unsupported value: "other"`,
+		},
+		{
+			name: "MatchConstraints is required",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+				},
+			},
+
+			expectedError: `spec.matchConstraints: Required value`,
+		},
+		{
+			name: "matchConstraints.resourceRules is required",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules: Required value`,
+		},
+		{
+			name: "matchConstraints.resourceRules has at least one explicit rule",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Rule: admissionregistration.Rule{},
+								},
+								ResourceNames: []string{"/./."},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].apiVersions: Required value`,
+		},
+		{
+			name: "expression is required",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{{}},
+				},
+			},
+
+			expectedError: `spec.validations[0].expression: Required value: expression is not specified`,
+		},
+		{
+			name: "matchResources resourceNames check",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								ResourceNames: []string{"/./."},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].resourceNames[0]: Invalid value: "/./."`,
+		},
+		{
+			name: "matchResources resourceNames cannot duplicate",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								ResourceNames: []string{"test", "test"},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].resourceNames[1]: Duplicate value: "test"`,
+		},
+		{
+			name: "matchResources validation: matchPolicy",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("other")
+							return &r
+						}(),
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.matchPolicy: Unsupported value: "other": supported values: "Equivalent", "Exact"`,
+		},
+		{
+			name: "Operations must not be empty or nil",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("Fail")
+						return &r
+					}(),
+					MatchConstraints: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: nil,
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+						ExcludeResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: nil,
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].operations: Required value, spec.matchConstraints.resourceRules[1].operations: Required value, spec.matchConstraints.excludeResourceRules[0].operations: Required value, spec.matchConstraints.excludeResourceRules[1].operations: Required value`,
+		},
+		{
+			name: "\"\" is NOT a valid operation",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE", ""},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `Unsupported value: ""`,
+		},
+		{
+			name: "operation must be either create/update/delete/connect",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"PATCH"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `Unsupported value: "PATCH"`,
+		},
+		{
+			name: "wildcard operation cannot be mixed with other strings",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE", "*"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `if '*' is present, must not specify other operations`,
+		},
+		{
+			name: `resource "*" can co-exist with resources that have subresources`,
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("Fail")
+						return &r
+					}(),
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*", "a/b", "a/*", "*/b"},
+									},
+								},
+							},
+						},
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: `resource "*" cannot mix with resources that don't have subresources`,
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*", "a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `if '*' is present, must not specify other resources without subresources`,
+		},
+		{
+			name: "resource a/* cannot mix with a/x",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a/*", "a/x"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].resources[1]: Invalid value: "a/x": if 'a/*' is present, must not specify a/x`,
+		},
+		{
+			name: "resource a/* can mix with a",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("Fail")
+						return &r
+					}(),
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a/*", "a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "resource */a cannot mix with x/a",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*/a", "x/a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].resources[1]: Invalid value: "x/a": if '*/a' is present, must not specify x/a`,
+		},
+		{
+			name: "resource */* cannot mix with other resources",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*/*", "a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchConstraints.resourceRules[0].resources: Invalid value: []string{"*/*", "a"}: if '*/*' is present, must not specify other resources`,
+		},
+		{
+			name: "invalid expression",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x in [1, 2, ",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*/*"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.validations[0].expression: Invalid value: "object.x in [1, 2, ": compilation failed: ERROR: <input>:1:19: Syntax error: missing ']' at '<EOF>`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errs := ValidateValidatingAdmissionPolicy(test.config)
+			err := errs.ToAggregate()
+			if err != nil {
+				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
+					t.Errorf("expected to contain %s, got %s", e, a)
+				}
+			} else {
+				if test.expectedError != "" {
+					t.Errorf("unexpected no error, expected to contain %s", test.expectedError)
+				}
+			}
+		})
+
+	}
+}
+
+func TestValidateValidatingAdmissionPolicyUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		oldconfig     *admissionregistration.ValidatingAdmissionPolicy
+		config        *admissionregistration.ValidatingAdmissionPolicy
+		expectedError string
+	}{
+		{
+			name: "should pass on valid new ValidatingAdmissionPolicy",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("Fail")
+						return &r
+					}(),
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldconfig: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "should pass on valid new ValidatingAdmissionPolicy with invalid old ValidatingAdmissionPolicy",
+			config: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{
+					FailurePolicy: func() *admissionregistration.FailurePolicyType {
+						r := admissionregistration.FailurePolicyType("Fail")
+						return &r
+					}(),
+					Validations: []admissionregistration.Validation{
+						{
+							Expression: "object.x < 100",
+						},
+					},
+					MatchConstraints: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldconfig: &admissionregistration.ValidatingAdmissionPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "!!!",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicySpec{},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errs := ValidateValidatingAdmissionPolicyUpdate(test.config, test.oldconfig)
+			err := errs.ToAggregate()
+			if err != nil {
+				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
+					t.Errorf("expected to contain %s, got %s", e, a)
+				}
+			} else {
+				if test.expectedError != "" {
+					t.Errorf("unexpected no error, expected to contain %s", test.expectedError)
+				}
+			}
+		})
+
+	}
+}
+
+func TestValidateValidatingAdmissionPolicyBinding(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        *admissionregistration.ValidatingAdmissionPolicyBinding
+		expectedError string
+	}{
+		{
+			name: "metadata.name validation",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "!!!!",
+				},
+			},
+			expectedError: `metadata.name: Invalid value: "!!!!":`,
+		},
+		{
+			name: "PolicyName is required",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{},
+			},
+			expectedError: `spec.policyName: Required value`,
+		},
+		{
+			name: "matchResources validation: matchPolicy",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("other")
+							return &r
+						}(),
+					},
+				},
+			},
+			expectedError: `spec.matchResouces.matchPolicy: Unsupported value: "other": supported values: "Equivalent", "Exact"`,
+		},
+		{
+			name: "Operations must not be empty or nil",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: nil,
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+						ExcludeResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: nil,
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchResouces.resourceRules[0].operations: Required value, spec.matchResouces.resourceRules[1].operations: Required value, spec.matchResouces.excludeResourceRules[0].operations: Required value, spec.matchResouces.excludeResourceRules[1].operations: Required value`,
+		},
+		{
+			name: "\"\" is NOT a valid operation",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					}, MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE", ""},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `Unsupported value: ""`,
+		},
+		{
+			name: "operation must be either create/update/delete/connect",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					}, MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"PATCH"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `Unsupported value: "PATCH"`,
+		},
+		{
+			name: "wildcard operation cannot be mixed with other strings",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE", "*"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `if '*' is present, must not specify other operations`,
+		},
+		{
+			name: `resource "*" can co-exist with resources that have subresources`,
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*", "a/b", "a/*", "*/b"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: `resource "*" cannot mix with resources that don't have subresources`,
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*", "a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `if '*' is present, must not specify other resources without subresources`,
+		},
+		{
+			name: "resource a/* cannot mix with a/x",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a/*", "a/x"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchResouces.resourceRules[0].resources[1]: Invalid value: "a/x": if 'a/*' is present, must not specify a/x`,
+		},
+		{
+			name: "resource a/* can mix with a",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a/*", "a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "resource */a cannot mix with x/a",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*/a", "x/a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchResouces.resourceRules[0].resources[1]: Invalid value: "x/a": if '*/a' is present, must not specify x/a`,
+		},
+		{
+			name: "resource */* cannot mix with other resources",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"*/*", "a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedError: `spec.matchResouces.resourceRules[0].resources: Invalid value: []string{"*/*", "a"}: if '*/*' is present, must not specify other resources`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errs := ValidateValidatingAdmissionPolicyBinding(test.config)
+			err := errs.ToAggregate()
+			if err != nil {
+				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {
+					t.Errorf("expected to contain %s, got %s", e, a)
+				}
+			} else {
+				if test.expectedError != "" {
+					t.Errorf("unexpected no error, expected to contain %s", test.expectedError)
+				}
+			}
+		})
+
+	}
+}
+
+func TestValidateValidatingAdmissionPolicyBindingUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		oldconfig     *admissionregistration.ValidatingAdmissionPolicyBinding
+		config        *admissionregistration.ValidatingAdmissionPolicyBinding
+		expectedError string
+	}{
+		{
+			name: "should pass on valid new ValidatingAdmissionPolicyBinding",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldconfig: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "should pass on valid new ValidatingAdmissionPolicyBinding with invalid old ValidatingAdmissionPolicyBinding",
+			config: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "config",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "xyzlimit-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name: "xyzlimit-scale-setting.example.com",
+					},
+					MatchResources: &admissionregistration.MatchResources{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						ObjectSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"a": "b"},
+						},
+						MatchPolicy: func() *admissionregistration.MatchPolicyType {
+							r := admissionregistration.MatchPolicyType("Exact")
+							return &r
+						}(),
+						ResourceRules: []admissionregistration.NamedRuleWithOperations{
+							{
+								RuleWithOperations: admissionregistration.RuleWithOperations{
+									Operations: []admissionregistration.OperationType{"CREATE"},
+									Rule: admissionregistration.Rule{
+										APIGroups:   []string{"a"},
+										APIVersions: []string{"a"},
+										Resources:   []string{"a"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldconfig: &admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "!!!",
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errs := ValidateValidatingAdmissionPolicyBindingUpdate(test.config, test.oldconfig)
 			err := errs.ToAggregate()
 			if err != nil {
 				if e, a := test.expectedError, err.Error(); !strings.Contains(a, e) || e == "" {

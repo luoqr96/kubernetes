@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -23,6 +24,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/legacy-cloud-providers/azure/retry"
@@ -56,6 +58,9 @@ func TestExtractNotFound(t *testing.T) {
 }
 
 func TestIsNodeUnmanaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tests := []struct {
 		name           string
 		unmanagedNodes sets.String
@@ -89,7 +94,7 @@ func TestIsNodeUnmanaged(t *testing.T) {
 		},
 	}
 
-	az := getTestCloud()
+	az := GetTestCloud(ctrl)
 	for _, test := range tests {
 		az.unmanagedNodes = test.unmanagedNodes
 		if test.expectErr {
@@ -110,6 +115,9 @@ func TestIsNodeUnmanaged(t *testing.T) {
 }
 
 func TestIsNodeUnmanagedByProviderID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tests := []struct {
 		providerID string
 		expected   bool
@@ -137,7 +145,7 @@ func TestIsNodeUnmanagedByProviderID(t *testing.T) {
 		},
 	}
 
-	az := getTestCloud()
+	az := GetTestCloud(ctrl)
 	for _, test := range tests {
 		isUnmanagedNode := az.IsNodeUnmanagedByProviderID(test.providerID)
 		assert.Equal(t, test.expected, isUnmanagedNode, test.providerID)

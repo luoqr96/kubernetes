@@ -17,8 +17,10 @@ limitations under the License.
 package leaderelection
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sync"
 	"testing"
 	"time"
@@ -29,12 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/client-go/kubernetes/fake"
 	fakeclient "k8s.io/client-go/testing"
 	rl "k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 )
 
 func createLockObject(t *testing.T, objectType, namespace, name string, record *rl.LeaderElectionRecord) (obj runtime.Object) {
@@ -65,11 +67,6 @@ func createLockObject(t *testing.T, objectType, namespace, name string, record *
 	return
 }
 
-// Will test leader election using endpoints as the resource
-func TestTryAcquireOrRenewEndpoints(t *testing.T) {
-	testTryAcquireOrRenew(t, "endpoints")
-}
-
 type Reactor struct {
 	verb       string
 	objectType string
@@ -77,14 +74,17 @@ type Reactor struct {
 }
 
 func testTryAcquireOrRenew(t *testing.T, objectType string) {
-	future := time.Now().Add(1000 * time.Hour)
-	past := time.Now().Add(-1000 * time.Hour)
+	clock := clock.RealClock{}
+	future := clock.Now().Add(1000 * time.Hour)
+	past := clock.Now().Add(-1000 * time.Hour)
 
 	tests := []struct {
 		name           string
 		observedRecord rl.LeaderElectionRecord
 		observedTime   time.Time
+		retryAfter     time.Duration
 		reactors       []Reactor
+		expectedEvents []string
 
 		expectSuccess    bool
 		transitionLeader bool
@@ -125,6 +125,33 @@ func testTryAcquireOrRenew(t *testing.T, objectType string) {
 					},
 				},
 			},
+			expectSuccess:    true,
+			transitionLeader: true,
+			outHolder:        "baz",
+		},
+		{
+			name: "acquire from led object with the lease duration seconds",
+			reactors: []Reactor{
+				{
+					verb: "get",
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						return true, createLockObject(t, objectType, action.GetNamespace(), action.(fakeclient.GetAction).GetName(), &rl.LeaderElectionRecord{HolderIdentity: "bing", LeaseDurationSeconds: 3}), nil
+					},
+				},
+				{
+					verb: "get",
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						return true, createLockObject(t, objectType, action.GetNamespace(), action.(fakeclient.GetAction).GetName(), &rl.LeaderElectionRecord{HolderIdentity: "bing", LeaseDurationSeconds: 3}), nil
+					},
+				},
+				{
+					verb: "update",
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						return true, action.(fakeclient.CreateAction).GetObject(), nil
+					},
+				},
+			},
+			retryAfter:       3 * time.Second,
 			expectSuccess:    true,
 			transitionLeader: true,
 			outHolder:        "baz",
@@ -244,9 +271,10 @@ func testTryAcquireOrRenew(t *testing.T, objectType string) {
 			var lock rl.Interface
 
 			objectMeta := metav1.ObjectMeta{Namespace: "foo", Name: "bar"}
+			recorder := record.NewFakeRecorder(100)
 			resourceLockConfig := rl.ResourceLockConfig{
 				Identity:      "baz",
-				EventRecorder: &record.FakeRecorder{},
+				EventRecorder: recorder,
 			}
 			c := &fake.Clientset{}
 			for _, reactor := range test.reactors {
@@ -258,24 +286,14 @@ func testTryAcquireOrRenew(t *testing.T, objectType string) {
 			})
 
 			switch objectType {
-			case "endpoints":
-				lock = &rl.EndpointsLock{
-					EndpointsMeta: objectMeta,
-					LockConfig:    resourceLockConfig,
-					Client:        c.CoreV1(),
-				}
-			case "configmaps":
-				lock = &rl.ConfigMapLock{
-					ConfigMapMeta: objectMeta,
-					LockConfig:    resourceLockConfig,
-					Client:        c.CoreV1(),
-				}
 			case "leases":
 				lock = &rl.LeaseLock{
 					LeaseMeta:  objectMeta,
 					LockConfig: resourceLockConfig,
 					Client:     c.CoordinationV1(),
 				}
+			default:
+				t.Fatalf("Unknown objectType: %v", objectType)
 			}
 
 			lec := LeaderElectionConfig{
@@ -294,10 +312,17 @@ func testTryAcquireOrRenew(t *testing.T, objectType string) {
 				observedRecord:    test.observedRecord,
 				observedRawRecord: observedRawRecord,
 				observedTime:      test.observedTime,
-				clock:             clock.RealClock{},
+				clock:             clock,
 			}
-			if test.expectSuccess != le.tryAcquireOrRenew() {
-				t.Errorf("unexpected result of tryAcquireOrRenew: [succeeded=%v]", !test.expectSuccess)
+			if test.expectSuccess != le.tryAcquireOrRenew(context.Background()) {
+				if test.retryAfter != 0 {
+					time.Sleep(test.retryAfter)
+					if test.expectSuccess != le.tryAcquireOrRenew(context.Background()) {
+						t.Errorf("unexpected result of tryAcquireOrRenew: [succeeded=%v]", !test.expectSuccess)
+					}
+				} else {
+					t.Errorf("unexpected result of tryAcquireOrRenew: [succeeded=%v]", !test.expectSuccess)
+				}
 			}
 
 			le.observedRecord.AcquireTime = metav1.Time{}
@@ -320,13 +345,9 @@ func testTryAcquireOrRenew(t *testing.T, objectType string) {
 			if reportedLeader != test.outHolder {
 				t.Errorf("reported leader was not the new leader. expected %q, got %q", test.outHolder, reportedLeader)
 			}
+			assertEqualEvents(t, test.expectedEvents, recorder.Events)
 		})
 	}
-}
-
-// Will test leader election using configmap as the resource
-func TestTryAcquireOrRenewConfigMaps(t *testing.T) {
-	testTryAcquireOrRenew(t, "configmaps")
 }
 
 // Will test leader election using lease as the resource
@@ -363,9 +384,9 @@ func TestLeaseSpecToLeaderElectionRecordRoundTrip(t *testing.T) {
 func multiLockType(t *testing.T, objectType string) (primaryType, secondaryType string) {
 	switch objectType {
 	case rl.EndpointsLeasesResourceLock:
-		return rl.EndpointsResourceLock, rl.LeasesResourceLock
+		return "endpoints", rl.LeasesResourceLock
 	case rl.ConfigMapsLeasesResourceLock:
-		return rl.ConfigMapsResourceLock, rl.LeasesResourceLock
+		return "configmaps", rl.LeasesResourceLock
 	default:
 		t.Fatal("unexpected objType:" + objectType)
 	}
@@ -393,8 +414,9 @@ func GetRawRecordOrDie(t *testing.T, objectType string, ler rl.LeaderElectionRec
 }
 
 func testTryAcquireOrRenewMultiLock(t *testing.T, objectType string) {
-	future := time.Now().Add(1000 * time.Hour)
-	past := time.Now().Add(-1000 * time.Hour)
+	clock := clock.RealClock{}
+	future := clock.Now().Add(1000 * time.Hour)
+	past := clock.Now().Add(-1000 * time.Hour)
 	primaryType, secondaryType := multiLockType(t, objectType)
 	tests := []struct {
 		name              string
@@ -402,6 +424,7 @@ func testTryAcquireOrRenewMultiLock(t *testing.T, objectType string) {
 		observedRawRecord []byte
 		observedTime      time.Time
 		reactors          []Reactor
+		expectedEvents    []string
 
 		expectSuccess    bool
 		transitionLeader bool
@@ -817,12 +840,11 @@ func testTryAcquireOrRenewMultiLock(t *testing.T, objectType string) {
 			var wg sync.WaitGroup
 			wg.Add(1)
 			var reportedLeader string
-			var lock rl.Interface
 
-			objectMeta := metav1.ObjectMeta{Namespace: "foo", Name: "bar"}
+			recorder := record.NewFakeRecorder(100)
 			resourceLockConfig := rl.ResourceLockConfig{
 				Identity:      "baz",
-				EventRecorder: &record.FakeRecorder{},
+				EventRecorder: recorder,
 			}
 			c := &fake.Clientset{}
 			for _, reactor := range test.reactors {
@@ -833,33 +855,9 @@ func testTryAcquireOrRenewMultiLock(t *testing.T, objectType string) {
 				return true, nil, fmt.Errorf("unreachable action")
 			})
 
-			switch objectType {
-			case rl.EndpointsLeasesResourceLock:
-				lock = &rl.MultiLock{
-					Primary: &rl.EndpointsLock{
-						EndpointsMeta: objectMeta,
-						LockConfig:    resourceLockConfig,
-						Client:        c.CoreV1(),
-					},
-					Secondary: &rl.LeaseLock{
-						LeaseMeta:  objectMeta,
-						LockConfig: resourceLockConfig,
-						Client:     c.CoordinationV1(),
-					},
-				}
-			case rl.ConfigMapsLeasesResourceLock:
-				lock = &rl.MultiLock{
-					Primary: &rl.ConfigMapLock{
-						ConfigMapMeta: objectMeta,
-						LockConfig:    resourceLockConfig,
-						Client:        c.CoreV1(),
-					},
-					Secondary: &rl.LeaseLock{
-						LeaseMeta:  objectMeta,
-						LockConfig: resourceLockConfig,
-						Client:     c.CoordinationV1(),
-					},
-				}
+			lock, err := rl.New(objectType, "foo", "bar", c.CoreV1(), c.CoordinationV1(), resourceLockConfig)
+			if err != nil {
+				t.Fatalf("Couldn't create lock: %v", err)
 			}
 
 			lec := LeaderElectionConfig{
@@ -877,9 +875,9 @@ func testTryAcquireOrRenewMultiLock(t *testing.T, objectType string) {
 				observedRecord:    test.observedRecord,
 				observedRawRecord: test.observedRawRecord,
 				observedTime:      test.observedTime,
-				clock:             clock.RealClock{},
+				clock:             clock,
 			}
-			if test.expectSuccess != le.tryAcquireOrRenew() {
+			if test.expectSuccess != le.tryAcquireOrRenew(context.Background()) {
 				t.Errorf("unexpected result of tryAcquireOrRenew: [succeeded=%v]", !test.expectSuccess)
 			}
 
@@ -903,6 +901,7 @@ func testTryAcquireOrRenewMultiLock(t *testing.T, objectType string) {
 			if reportedLeader != test.outHolder {
 				t.Errorf("reported leader was not the new leader. expected %q, got %q", test.outHolder, reportedLeader)
 			}
+			assertEqualEvents(t, test.expectedEvents, recorder.Events)
 		})
 	}
 }
@@ -915,4 +914,386 @@ func TestTryAcquireOrRenewEndpointsLeases(t *testing.T) {
 // Will test leader election using configmapsleases as the resource
 func TestTryAcquireOrRenewConfigMapsLeases(t *testing.T) {
 	testTryAcquireOrRenewMultiLock(t, "configmapsleases")
+}
+
+func testReleaseLease(t *testing.T, objectType string) {
+	tests := []struct {
+		name           string
+		observedRecord rl.LeaderElectionRecord
+		observedTime   time.Time
+		reactors       []Reactor
+		expectedEvents []string
+
+		expectSuccess    bool
+		transitionLeader bool
+		outHolder        string
+	}{
+		{
+			name: "release acquired lock from no object",
+			reactors: []Reactor{
+				{
+					verb:       "get",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, errors.NewNotFound(action.(fakeclient.GetAction).GetResource().GroupResource(), action.(fakeclient.GetAction).GetName())
+					},
+				},
+				{
+					verb:       "create",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						return true, action.(fakeclient.CreateAction).GetObject(), nil
+					},
+				},
+				{
+					verb:       "update",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						return true, action.(fakeclient.UpdateAction).GetObject(), nil
+					},
+				},
+			},
+			expectSuccess: true,
+			outHolder:     "",
+		},
+	}
+
+	for i := range tests {
+		test := &tests[i]
+		t.Run(test.name, func(t *testing.T) {
+			// OnNewLeader is called async so we have to wait for it.
+			var wg sync.WaitGroup
+			wg.Add(1)
+			var reportedLeader string
+			var lock rl.Interface
+
+			objectMeta := metav1.ObjectMeta{Namespace: "foo", Name: "bar"}
+			recorder := record.NewFakeRecorder(100)
+			resourceLockConfig := rl.ResourceLockConfig{
+				Identity:      "baz",
+				EventRecorder: recorder,
+			}
+			c := &fake.Clientset{}
+			for _, reactor := range test.reactors {
+				c.AddReactor(reactor.verb, objectType, reactor.reaction)
+			}
+			c.AddReactor("*", "*", func(action fakeclient.Action) (bool, runtime.Object, error) {
+				t.Errorf("unreachable action. testclient called too many times: %+v", action)
+				return true, nil, fmt.Errorf("unreachable action")
+			})
+
+			switch objectType {
+			case "leases":
+				lock = &rl.LeaseLock{
+					LeaseMeta:  objectMeta,
+					LockConfig: resourceLockConfig,
+					Client:     c.CoordinationV1(),
+				}
+			default:
+				t.Fatalf("Unknown objectType: %v", objectType)
+			}
+
+			lec := LeaderElectionConfig{
+				Lock:          lock,
+				LeaseDuration: 10 * time.Second,
+				Callbacks: LeaderCallbacks{
+					OnNewLeader: func(l string) {
+						defer wg.Done()
+						reportedLeader = l
+					},
+				},
+			}
+			observedRawRecord := GetRawRecordOrDie(t, objectType, test.observedRecord)
+			le := &LeaderElector{
+				config:            lec,
+				observedRecord:    test.observedRecord,
+				observedRawRecord: observedRawRecord,
+				observedTime:      test.observedTime,
+				clock:             clock.RealClock{},
+			}
+			if !le.tryAcquireOrRenew(context.Background()) {
+				t.Errorf("unexpected result of tryAcquireOrRenew: [succeeded=%v]", true)
+			}
+
+			le.maybeReportTransition()
+
+			// Wait for a response to the leader transition, and add 1 so that we can track the final transition.
+			wg.Wait()
+			wg.Add(1)
+
+			if test.expectSuccess != le.release() {
+				t.Errorf("unexpected result of release: [succeeded=%v]", !test.expectSuccess)
+			}
+
+			le.observedRecord.AcquireTime = metav1.Time{}
+			le.observedRecord.RenewTime = metav1.Time{}
+			if le.observedRecord.HolderIdentity != test.outHolder {
+				t.Errorf("expected holder:\n\t%+v\ngot:\n\t%+v", test.outHolder, le.observedRecord.HolderIdentity)
+			}
+			if len(test.reactors) != len(c.Actions()) {
+				t.Errorf("wrong number of api interactions")
+			}
+			if test.transitionLeader && le.observedRecord.LeaderTransitions != 1 {
+				t.Errorf("leader should have transitioned but did not")
+			}
+			if !test.transitionLeader && le.observedRecord.LeaderTransitions != 0 {
+				t.Errorf("leader should not have transitioned but did")
+			}
+			le.maybeReportTransition()
+			wg.Wait()
+			if reportedLeader != test.outHolder {
+				t.Errorf("reported leader was not the new leader. expected %q, got %q", test.outHolder, reportedLeader)
+			}
+			assertEqualEvents(t, test.expectedEvents, recorder.Events)
+		})
+	}
+}
+
+// Will test leader election using endpoints as the resource
+func TestReleaseLeaseLeases(t *testing.T) {
+	testReleaseLease(t, "leases")
+}
+
+func TestReleaseOnCancellation_Leases(t *testing.T) {
+	testReleaseOnCancellation(t, "leases")
+}
+
+func testReleaseOnCancellation(t *testing.T, objectType string) {
+	var (
+		onNewLeader   = make(chan struct{})
+		onRenewCalled = make(chan struct{})
+		onRenewResume = make(chan struct{})
+		onRelease     = make(chan struct{})
+
+		lockObj runtime.Object
+		gets    int
+		updates int
+		wg      sync.WaitGroup
+	)
+	resetVars := func() {
+		onNewLeader = make(chan struct{})
+		onRenewCalled = make(chan struct{})
+		onRenewResume = make(chan struct{})
+		onRelease = make(chan struct{})
+
+		lockObj = nil
+		gets = 0
+		updates = 0
+	}
+	lec := LeaderElectionConfig{
+		LeaseDuration: 15 * time.Second,
+		RenewDeadline: 2 * time.Second,
+		RetryPeriod:   1 * time.Second,
+
+		// This is what we're testing
+		ReleaseOnCancel: true,
+
+		Callbacks: LeaderCallbacks{
+			OnNewLeader:      func(identity string) {},
+			OnStoppedLeading: func() {},
+			OnStartedLeading: func(context.Context) {
+				close(onNewLeader)
+			},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		reactors       []Reactor
+		expectedEvents []string
+	}{
+		{
+			name: "release acquired lock on cancellation of update",
+			reactors: []Reactor{
+				{
+					verb:       "get",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						gets++
+						if lockObj != nil {
+							return true, lockObj, nil
+						}
+						return true, nil, errors.NewNotFound(action.(fakeclient.GetAction).GetResource().GroupResource(), action.(fakeclient.GetAction).GetName())
+					},
+				},
+				{
+					verb:       "create",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						lockObj = action.(fakeclient.CreateAction).GetObject()
+						return true, lockObj, nil
+					},
+				},
+				{
+					verb:       "update",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						updates++
+
+						// Second update (first renew) should return our canceled error
+						// FakeClient doesn't do anything with the context so we're doing this ourselves
+						if updates == 2 {
+							close(onRenewCalled)
+							<-onRenewResume
+							return true, nil, context.Canceled
+						} else if updates == 3 {
+							// We update the lock after the cancellation to release it
+							// This wg is to avoid the data race on lockObj
+							defer wg.Done()
+							close(onRelease)
+						}
+
+						lockObj = action.(fakeclient.UpdateAction).GetObject()
+						return true, lockObj, nil
+					},
+				},
+			},
+			expectedEvents: []string{
+				"Normal LeaderElection baz became leader",
+				"Normal LeaderElection baz stopped leading",
+			},
+		},
+		{
+			name: "release acquired lock on cancellation of get",
+			reactors: []Reactor{
+				{
+					verb:       "get",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						gets++
+						if lockObj != nil {
+							// Third and more get (first create, second renew) should return our canceled error
+							// FakeClient doesn't do anything with the context so we're doing this ourselves
+							if gets >= 3 {
+								close(onRenewCalled)
+								<-onRenewResume
+								return true, nil, context.Canceled
+							}
+							return true, lockObj, nil
+						}
+						return true, nil, errors.NewNotFound(action.(fakeclient.GetAction).GetResource().GroupResource(), action.(fakeclient.GetAction).GetName())
+					},
+				},
+				{
+					verb:       "create",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						lockObj = action.(fakeclient.CreateAction).GetObject()
+						return true, lockObj, nil
+					},
+				},
+				{
+					verb:       "update",
+					objectType: objectType,
+					reaction: func(action fakeclient.Action) (handled bool, ret runtime.Object, err error) {
+						updates++
+						// Second update (first renew) should release the lock
+						if updates == 2 {
+							// We update the lock after the cancellation to release it
+							// This wg is to avoid the data race on lockObj
+							defer wg.Done()
+							close(onRelease)
+						}
+
+						lockObj = action.(fakeclient.UpdateAction).GetObject()
+						return true, lockObj, nil
+					},
+				},
+			},
+			expectedEvents: []string{
+				"Normal LeaderElection baz became leader",
+				"Normal LeaderElection baz stopped leading",
+			},
+		},
+	}
+
+	for i := range tests {
+		test := &tests[i]
+		t.Run(test.name, func(t *testing.T) {
+			wg.Add(1)
+			resetVars()
+
+			recorder := record.NewFakeRecorder(100)
+			resourceLockConfig := rl.ResourceLockConfig{
+				Identity:      "baz",
+				EventRecorder: recorder,
+			}
+			c := &fake.Clientset{}
+			for _, reactor := range test.reactors {
+				c.AddReactor(reactor.verb, objectType, reactor.reaction)
+			}
+			c.AddReactor("*", "*", func(action fakeclient.Action) (bool, runtime.Object, error) {
+				t.Errorf("unreachable action. testclient called too many times: %+v", action)
+				return true, nil, fmt.Errorf("unreachable action")
+			})
+			lock, err := rl.New(objectType, "foo", "bar", c.CoreV1(), c.CoordinationV1(), resourceLockConfig)
+			if err != nil {
+				t.Fatal("resourcelock.New() = ", err)
+			}
+
+			lec.Lock = lock
+			elector, err := NewLeaderElector(lec)
+			if err != nil {
+				t.Fatal("Failed to create leader elector: ", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+
+			go elector.Run(ctx)
+
+			// Wait for us to become the leader
+			select {
+			case <-onNewLeader:
+			case <-time.After(10 * time.Second):
+				t.Fatal("failed to become the leader")
+			}
+
+			// Wait for renew (update) to be invoked
+			select {
+			case <-onRenewCalled:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the elector failed to renew the lock")
+			}
+
+			// Cancel the context - stopping the elector while
+			// it's running
+			cancel()
+
+			// Resume the tryAcquireOrRenew call to return the cancellation
+			// which should trigger the release flow
+			close(onRenewResume)
+
+			select {
+			case <-onRelease:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the lock was not released")
+			}
+			wg.Wait()
+			assertEqualEvents(t, test.expectedEvents, recorder.Events)
+		})
+	}
+}
+
+func assertEqualEvents(t *testing.T, expected []string, actual <-chan string) {
+	c := time.After(wait.ForeverTestTimeout)
+	for _, e := range expected {
+		select {
+		case a := <-actual:
+			if e != a {
+				t.Errorf("Expected event %q, got %q", e, a)
+				return
+			}
+		case <-c:
+			t.Errorf("Expected event %q, got nothing", e)
+			// continue iterating to print all expected events
+		}
+	}
+	for {
+		select {
+		case a := <-actual:
+			t.Errorf("Unexpected event: %q", a)
+		default:
+			return // No more events, as expected.
+		}
+	}
 }

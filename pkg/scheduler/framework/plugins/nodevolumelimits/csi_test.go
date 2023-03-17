@@ -18,6 +18,7 @@ package nodevolumelimits
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -29,16 +30,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	csitrans "k8s.io/csi-translation-lib"
 	csilibplugins "k8s.io/csi-translation-lib/plugins"
-	"k8s.io/kubernetes/pkg/features"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	fakelisters "k8s.io/kubernetes/pkg/scheduler/listers/fake"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
+	fakeframework "k8s.io/kubernetes/pkg/scheduler/framework/fake"
+	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/pointer"
 )
 
 const (
@@ -46,6 +44,10 @@ const (
 	gceCSIDriverName = csilibplugins.GCEPDDriverName
 
 	hostpathInTreePluginName = "kubernetes.io/hostpath"
+)
+
+var (
+	scName = "csi-sc"
 )
 
 // getVolumeLimitKey returns a ResourceName by filter type
@@ -65,171 +67,122 @@ func getVolumeLimitKey(filterType string) v1.ResourceName {
 }
 
 func TestCSILimits(t *testing.T) {
-	runningPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-ebs.csi.aws.com-3",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pendingVolumePod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-4",
-						},
-					},
-				},
-			},
-		},
-	}
+	runningPod := st.MakePod().PVC("csi-ebs.csi.aws.com-3").Obj()
+	pendingVolumePod := st.MakePod().PVC("csi-4").Obj()
 
 	// Different pod than pendingVolumePod, but using the same unbound PVC
-	unboundPVCPod2 := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-4",
-						},
-					},
-				},
-			},
-		},
-	}
+	unboundPVCPod2 := st.MakePod().PVC("csi-4").Obj()
 
-	missingPVPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-6",
-						},
-					},
-				},
-			},
-		},
-	}
+	missingPVPod := st.MakePod().PVC("csi-6").Obj()
+	noSCPVCPod := st.MakePod().PVC("csi-5").Obj()
 
-	noSCPVCPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-5",
-						},
-					},
-				},
-			},
-		},
-	}
-	gceTwoVolPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-pd.csi.storage.gke.io-1",
-						},
-					},
-				},
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-pd.csi.storage.gke.io-2",
-						},
-					},
-				},
-			},
-		},
-	}
+	gceTwoVolPod := st.MakePod().PVC("csi-pd.csi.storage.gke.io-1").PVC("csi-pd.csi.storage.gke.io-2").Obj()
+
 	// In-tree volumes
-	inTreeOneVolPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-kubernetes.io/aws-ebs-0",
-						},
-					},
-				},
-			},
-		},
-	}
-	inTreeTwoVolPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-kubernetes.io/aws-ebs-1",
-						},
-					},
-				},
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-kubernetes.io/aws-ebs-2",
-						},
-					},
-				},
-			},
-		},
-	}
+	inTreeOneVolPod := st.MakePod().PVC("csi-kubernetes.io/aws-ebs-0").Obj()
+	inTreeTwoVolPod := st.MakePod().PVC("csi-kubernetes.io/aws-ebs-1").PVC("csi-kubernetes.io/aws-ebs-2").Obj()
+
 	// pods with matching csi driver names
-	csiEBSOneVolPod := &v1.Pod{
+	csiEBSOneVolPod := st.MakePod().PVC("csi-ebs.csi.aws.com-0").Obj()
+	csiEBSTwoVolPod := st.MakePod().PVC("csi-ebs.csi.aws.com-1").PVC("csi-ebs.csi.aws.com-2").Obj()
+
+	inTreeNonMigratableOneVolPod := st.MakePod().PVC("csi-kubernetes.io/hostpath-0").Obj()
+
+	ephemeralVolumePod := st.MakePod().Name("abc").Namespace("test").UID("12345").Volume(
+		v1.Volume{
+			Name: "xyz",
+			VolumeSource: v1.VolumeSource{
+				Ephemeral: &v1.EphemeralVolumeSource{},
+			},
+		}).Obj()
+
+	controller := true
+	ephemeralClaim := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ephemeralVolumePod.Namespace,
+			Name:      ephemeralVolumePod.Name + "-" + ephemeralVolumePod.Spec.Volumes[0].Name,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					Kind:       "Pod",
+					Name:       ephemeralVolumePod.Name,
+					UID:        ephemeralVolumePod.UID,
+					Controller: &controller,
+				},
+			},
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+		},
+	}
+	conflictingClaim := ephemeralClaim.DeepCopy()
+	conflictingClaim.OwnerReferences = nil
+
+	ephemeralTwoVolumePod := st.MakePod().Name("abc").Namespace("test").UID("12345II").Volume(v1.Volume{
+		Name: "x",
+		VolumeSource: v1.VolumeSource{
+			Ephemeral: &v1.EphemeralVolumeSource{},
+		},
+	}).Volume(v1.Volume{
+		Name: "y",
+		VolumeSource: v1.VolumeSource{
+			Ephemeral: &v1.EphemeralVolumeSource{},
+		},
+	}).Obj()
+
+	ephemeralClaimX := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ephemeralTwoVolumePod.Namespace,
+			Name:      ephemeralTwoVolumePod.Name + "-" + ephemeralTwoVolumePod.Spec.Volumes[0].Name,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					Kind:       "Pod",
+					Name:       ephemeralTwoVolumePod.Name,
+					UID:        ephemeralTwoVolumePod.UID,
+					Controller: &controller,
+				},
+			},
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+		},
+	}
+	ephemeralClaimY := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ephemeralTwoVolumePod.Namespace,
+			Name:      ephemeralTwoVolumePod.Name + "-" + ephemeralTwoVolumePod.Spec.Volumes[1].Name,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					Kind:       "Pod",
+					Name:       ephemeralTwoVolumePod.Name,
+					UID:        ephemeralTwoVolumePod.UID,
+					Controller: &controller,
+				},
+			},
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+		},
+	}
+	inTreeInlineVolPod := &v1.Pod{
 		Spec: v1.PodSpec{
 			Volumes: []v1.Volume{
 				{
 					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-ebs.csi.aws.com-0",
+						AWSElasticBlockStore: &v1.AWSElasticBlockStoreVolumeSource{
+							VolumeID: "aws-inline1",
 						},
 					},
 				},
 			},
 		},
 	}
-	csiEBSTwoVolPod := &v1.Pod{
+	inTreeInlineVolPodWithSameCSIVolumeID := &v1.Pod{
 		Spec: v1.PodSpec{
 			Volumes: []v1.Volume{
 				{
 					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-ebs.csi.aws.com-1",
-						},
-					},
-				},
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-ebs.csi.aws.com-2",
-						},
-					},
-				},
-			},
-		},
-	}
-	inTreeNonMigratableOneVolPod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Volumes: []v1.Volume{
-				{
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "csi-kubernetes.io/hostpath-0",
+						AWSElasticBlockStore: &v1.AWSElasticBlockStoreVolumeSource{
+							VolumeID: "csi-ebs.csi.aws.com-1",
 						},
 					},
 				},
@@ -240,11 +193,13 @@ func TestCSILimits(t *testing.T) {
 	tests := []struct {
 		newPod           *v1.Pod
 		existingPods     []*v1.Pod
+		extraClaims      []v1.PersistentVolumeClaim
 		filterName       string
 		maxVols          int
 		driverNames      []string
 		test             string
 		migrationEnabled bool
+		ephemeralEnabled bool
 		limitSource      string
 		wantStatus       *framework.Status
 	}{
@@ -351,6 +306,16 @@ func TestCSILimits(t *testing.T) {
 			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
 		},
 		{
+			newPod:           inTreeInlineVolPod,
+			existingPods:     []*v1.Pod{inTreeTwoVolPod},
+			filterName:       "csi",
+			maxVols:          2,
+			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
+			migrationEnabled: true,
+			limitSource:      "node",
+			test:             "nil csi node",
+		},
+		{
 			newPod:           pendingVolumePod,
 			existingPods:     []*v1.Pod{inTreeTwoVolPod},
 			filterName:       "csi",
@@ -367,29 +332,9 @@ func TestCSILimits(t *testing.T) {
 			filterName:       "csi",
 			maxVols:          2,
 			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
-			migrationEnabled: false,
-			limitSource:      "csinode",
-			test:             "should not count in-tree volume if migration is disabled",
-		},
-		{
-			newPod:           inTreeOneVolPod,
-			existingPods:     []*v1.Pod{inTreeTwoVolPod},
-			filterName:       "csi",
-			maxVols:          2,
-			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
 			migrationEnabled: true,
 			limitSource:      "csinode-with-no-limit",
 			test:             "should not limit pod if volume used does not report limits",
-		},
-		{
-			newPod:           inTreeOneVolPod,
-			existingPods:     []*v1.Pod{inTreeTwoVolPod},
-			filterName:       "csi",
-			maxVols:          2,
-			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
-			migrationEnabled: false,
-			limitSource:      "csinode-with-no-limit",
-			test:             "should not limit in-tree pod if migration is disabled",
 		},
 		{
 			newPod:           inTreeNonMigratableOneVolPod,
@@ -400,6 +345,17 @@ func TestCSILimits(t *testing.T) {
 			migrationEnabled: true,
 			limitSource:      "csinode",
 			test:             "should not count non-migratable in-tree volumes",
+		},
+		{
+			newPod:           inTreeInlineVolPod,
+			existingPods:     []*v1.Pod{inTreeTwoVolPod},
+			filterName:       "csi",
+			maxVols:          2,
+			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
+			migrationEnabled: true,
+			limitSource:      "csinode",
+			test:             "should count in-tree inline volumes if migration is enabled",
+			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
 		},
 		// mixed volumes
 		{
@@ -414,6 +370,27 @@ func TestCSILimits(t *testing.T) {
 			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
 		},
 		{
+			newPod:           inTreeInlineVolPod,
+			existingPods:     []*v1.Pod{csiEBSTwoVolPod, inTreeOneVolPod},
+			filterName:       "csi",
+			maxVols:          3,
+			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
+			migrationEnabled: true,
+			limitSource:      "csinode",
+			test:             "should count in-tree, inline and csi volumes if migration is enabled (when scheduling in-tree volumes)",
+			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			newPod:           inTreeInlineVolPodWithSameCSIVolumeID,
+			existingPods:     []*v1.Pod{csiEBSTwoVolPod, inTreeOneVolPod},
+			filterName:       "csi",
+			maxVols:          3,
+			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
+			migrationEnabled: true,
+			limitSource:      "csinode",
+			test:             "should not count in-tree, inline and csi volumes if migration is enabled (when scheduling in-tree volumes)",
+		},
+		{
 			newPod:           csiEBSOneVolPod,
 			existingPods:     []*v1.Pod{inTreeTwoVolPod},
 			filterName:       "csi",
@@ -424,25 +401,89 @@ func TestCSILimits(t *testing.T) {
 			test:             "should count in-tree and csi volumes if migration is enabled (when scheduling csi volumes)",
 			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
 		},
+		// ephemeral volumes
 		{
-			newPod:           csiEBSOneVolPod,
-			existingPods:     []*v1.Pod{csiEBSTwoVolPod, inTreeTwoVolPod},
+			newPod:           ephemeralVolumePod,
 			filterName:       "csi",
-			maxVols:          3,
-			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
-			migrationEnabled: false,
-			limitSource:      "csinode",
-			test:             "should not count in-tree and count csi volumes if migration is disabled (when scheduling csi volumes)",
+			ephemeralEnabled: true,
+			driverNames:      []string{ebsCSIDriverName},
+			test:             "ephemeral volume missing",
+			wantStatus:       framework.AsStatus(errors.New(`looking up PVC test/abc-xyz: persistentvolumeclaim "abc-xyz" not found`)),
 		},
 		{
-			newPod:           inTreeOneVolPod,
-			existingPods:     []*v1.Pod{csiEBSTwoVolPod},
+			newPod:           ephemeralVolumePod,
 			filterName:       "csi",
+			ephemeralEnabled: true,
+			extraClaims:      []v1.PersistentVolumeClaim{*conflictingClaim},
+			driverNames:      []string{ebsCSIDriverName},
+			test:             "ephemeral volume not owned",
+			wantStatus:       framework.AsStatus(errors.New("PVC test/abc-xyz was not created for pod test/abc (pod is not owner)")),
+		},
+		{
+			newPod:           ephemeralVolumePod,
+			filterName:       "csi",
+			ephemeralEnabled: true,
+			extraClaims:      []v1.PersistentVolumeClaim{*ephemeralClaim},
+			driverNames:      []string{ebsCSIDriverName},
+			test:             "ephemeral volume unbound",
+		},
+		{
+			newPod:           ephemeralVolumePod,
+			filterName:       "csi",
+			ephemeralEnabled: true,
+			extraClaims:      []v1.PersistentVolumeClaim{*ephemeralClaim},
+			driverNames:      []string{ebsCSIDriverName},
+			existingPods:     []*v1.Pod{runningPod, csiEBSTwoVolPod},
 			maxVols:          2,
-			driverNames:      []string{csilibplugins.AWSEBSInTreePluginName, ebsCSIDriverName},
-			migrationEnabled: false,
-			limitSource:      "csinode",
-			test:             "should not count in-tree and count csi volumes if migration is disabled (when scheduling in-tree volumes)",
+			limitSource:      "node",
+			test:             "ephemeral doesn't when node volume limit <= pods CSI volume",
+			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			newPod:           csiEBSOneVolPod,
+			filterName:       "csi",
+			ephemeralEnabled: true,
+			extraClaims:      []v1.PersistentVolumeClaim{*ephemeralClaimX, *ephemeralClaimY},
+			driverNames:      []string{ebsCSIDriverName},
+			existingPods:     []*v1.Pod{runningPod, ephemeralTwoVolumePod},
+			maxVols:          2,
+			limitSource:      "node",
+			test:             "ephemeral doesn't when node volume limit <= pods ephemeral CSI volume",
+			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			newPod:           csiEBSOneVolPod,
+			filterName:       "csi",
+			ephemeralEnabled: false,
+			extraClaims:      []v1.PersistentVolumeClaim{*ephemeralClaim},
+			driverNames:      []string{ebsCSIDriverName},
+			existingPods:     []*v1.Pod{runningPod, ephemeralVolumePod, csiEBSTwoVolPod},
+			maxVols:          3,
+			limitSource:      "node",
+			test:             "persistent doesn't when node volume limit <= pods ephemeral CSI volume + persistent volume, ephemeral disabled",
+			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			newPod:           csiEBSOneVolPod,
+			filterName:       "csi",
+			ephemeralEnabled: true,
+			extraClaims:      []v1.PersistentVolumeClaim{*ephemeralClaim},
+			driverNames:      []string{ebsCSIDriverName},
+			existingPods:     []*v1.Pod{runningPod, ephemeralVolumePod, csiEBSTwoVolPod},
+			maxVols:          3,
+			limitSource:      "node",
+			test:             "persistent doesn't when node volume limit <= pods ephemeral CSI volume + persistent volume",
+			wantStatus:       framework.NewStatus(framework.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			newPod:           csiEBSOneVolPod,
+			filterName:       "csi",
+			ephemeralEnabled: true,
+			extraClaims:      []v1.PersistentVolumeClaim{*ephemeralClaim},
+			driverNames:      []string{ebsCSIDriverName},
+			existingPods:     []*v1.Pod{runningPod, ephemeralVolumePod, csiEBSTwoVolPod},
+			maxVols:          4,
+			test:             "persistent okay when node volume limit > pods ephemeral CSI volume + persistent volume",
 		},
 	}
 
@@ -450,22 +491,17 @@ func TestCSILimits(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.test, func(t *testing.T) {
 			node, csiNode := getNodeWithPodAndVolumeLimits(test.limitSource, test.existingPods, int64(test.maxVols), test.driverNames...)
-			if test.migrationEnabled {
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIMigration, true)()
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIMigrationAWS, true)()
+			if csiNode != nil {
 				enableMigrationOnNode(csiNode, csilibplugins.AWSEBSInTreePluginName)
-			} else {
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIMigration, false)()
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIMigrationAWS, false)()
 			}
-
+			csiTranslator := csitrans.New()
 			p := &CSILimits{
 				csiNodeLister:        getFakeCSINodeLister(csiNode),
 				pvLister:             getFakeCSIPVLister(test.filterName, test.driverNames...),
-				pvcLister:            getFakeCSIPVCLister(test.filterName, "csi-sc", test.driverNames...),
-				scLister:             getFakeCSIStorageClassLister("csi-sc", test.driverNames[0]),
+				pvcLister:            append(getFakeCSIPVCLister(test.filterName, scName, test.driverNames...), test.extraClaims...),
+				scLister:             getFakeCSIStorageClassLister(scName, test.driverNames[0]),
 				randomVolumeIDPrefix: rand.String(32),
-				translator:           csitrans.New(),
+				translator:           csiTranslator,
 			}
 			gotStatus := p.Filter(context.Background(), nil, test.newPod, node)
 			if !reflect.DeepEqual(gotStatus, test.wantStatus) {
@@ -475,8 +511,8 @@ func TestCSILimits(t *testing.T) {
 	}
 }
 
-func getFakeCSIPVLister(volumeName string, driverNames ...string) fakelisters.PersistentVolumeLister {
-	pvLister := fakelisters.PersistentVolumeLister{}
+func getFakeCSIPVLister(volumeName string, driverNames ...string) fakeframework.PersistentVolumeLister {
+	pvLister := fakeframework.PersistentVolumeLister{}
 	for _, driver := range driverNames {
 		for j := 0; j < 4; j++ {
 			volumeHandle := fmt.Sprintf("%s-%s-%d", volumeName, driver, j)
@@ -515,13 +551,13 @@ func getFakeCSIPVLister(volumeName string, driverNames ...string) fakelisters.Pe
 			}
 			pvLister = append(pvLister, pv)
 		}
-
 	}
+
 	return pvLister
 }
 
-func getFakeCSIPVCLister(volumeName, scName string, driverNames ...string) fakelisters.PersistentVolumeClaimLister {
-	pvcLister := fakelisters.PersistentVolumeClaimLister{}
+func getFakeCSIPVCLister(volumeName, scName string, driverNames ...string) fakeframework.PersistentVolumeClaimLister {
+	pvcLister := fakeframework.PersistentVolumeClaimLister{}
 	for _, driver := range driverNames {
 		for j := 0; j < 4; j++ {
 			v := fmt.Sprintf("%s-%s-%d", volumeName, driver, j)
@@ -563,8 +599,8 @@ func enableMigrationOnNode(csiNode *storagev1.CSINode, pluginName string) {
 	csiNode.Annotations = nodeInfoAnnotations
 }
 
-func getFakeCSIStorageClassLister(scName, provisionerName string) fakelisters.StorageClassLister {
-	return fakelisters.StorageClassLister{
+func getFakeCSIStorageClassLister(scName, provisionerName string) fakeframework.StorageClassLister {
+	return fakeframework.StorageClassLister{
 		{
 			ObjectMeta:  metav1.ObjectMeta{Name: scName},
 			Provisioner: provisionerName,
@@ -572,15 +608,16 @@ func getFakeCSIStorageClassLister(scName, provisionerName string) fakelisters.St
 	}
 }
 
-func getFakeCSINodeLister(csiNode *storagev1.CSINode) fakelisters.CSINodeLister {
+func getFakeCSINodeLister(csiNode *storagev1.CSINode) fakeframework.CSINodeLister {
+	csiNodeLister := fakeframework.CSINodeLister{}
 	if csiNode != nil {
-		return fakelisters.CSINodeLister(*csiNode)
+		csiNodeLister = append(csiNodeLister, *csiNode.DeepCopy())
 	}
-	return fakelisters.CSINodeLister{}
+	return csiNodeLister
 }
 
-func getNodeWithPodAndVolumeLimits(limitSource string, pods []*v1.Pod, limit int64, driverNames ...string) (*schedulernodeinfo.NodeInfo, *storagev1.CSINode) {
-	nodeInfo := schedulernodeinfo.NewNodeInfo(pods...)
+func getNodeWithPodAndVolumeLimits(limitSource string, pods []*v1.Pod, limit int64, driverNames ...string) (*framework.NodeInfo, *storagev1.CSINode) {
+	nodeInfo := framework.NewNodeInfo(pods...)
 	node := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-for-max-pd-test-1"},
 		Status: v1.NodeStatus{
@@ -597,7 +634,7 @@ func getNodeWithPodAndVolumeLimits(limitSource string, pods []*v1.Pod, limit int
 
 	initCSINode := func() {
 		csiNode = &storagev1.CSINode{
-			ObjectMeta: metav1.ObjectMeta{Name: "csi-node-for-max-pd-test-1"},
+			ObjectMeta: metav1.ObjectMeta{Name: "node-for-max-pd-test-1"},
 			Spec: storagev1.CSINodeSpec{
 				Drivers: []storagev1.CSINodeDriver{},
 			},
@@ -613,7 +650,7 @@ func getNodeWithPodAndVolumeLimits(limitSource string, pods []*v1.Pod, limit int
 			}
 			if addLimits {
 				driver.Allocatable = &storagev1.VolumeNodeResources{
-					Count: utilpointer.Int32Ptr(int32(limit)),
+					Count: pointer.Int32(int32(limit)),
 				}
 			}
 			csiNode.Spec.Drivers = append(csiNode.Spec.Drivers, driver)

@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM BASEIMAGE
+ARG BASEIMAGE
+FROM $BASEIMAGE
 
+ENV CUDA_PKG_VERSION=11-1
 CROSS_BUILD_COPY qemu-QEMUARCH-static /usr/bin/
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cuda-samples-$CUDA_PKG_VERSION && \
     rm -rf /var/lib/apt/lists/*

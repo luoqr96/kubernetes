@@ -17,13 +17,14 @@ limitations under the License.
 package scale
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"path"
 	"strings"
 	"testing"
 
-	"github.com/coreos/pkg/capnslog"
-	_ "go.etcd.io/etcd/etcdserver/api/v3rpc" // Force package logger init.
+	"google.golang.org/grpc/grpclog"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -120,16 +121,16 @@ func TestScaleSubresources(t *testing.T) {
 	}
 
 	// Create objects required to exercise scale subresources
-	if _, err := clientSet.CoreV1().ReplicationControllers("default").Create(rcStub); err != nil {
+	if _, err := clientSet.CoreV1().ReplicationControllers("default").Create(context.TODO(), rcStub, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clientSet.AppsV1().ReplicaSets("default").Create(rsStub); err != nil {
+	if _, err := clientSet.AppsV1().ReplicaSets("default").Create(context.TODO(), rsStub, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clientSet.AppsV1().Deployments("default").Create(deploymentStub); err != nil {
+	if _, err := clientSet.AppsV1().Deployments("default").Create(context.TODO(), deploymentStub, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clientSet.AppsV1().StatefulSets("default").Create(ssStub); err != nil {
+	if _, err := clientSet.AppsV1().StatefulSets("default").Create(context.TODO(), ssStub, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +146,7 @@ func TestScaleSubresources(t *testing.T) {
 		urlPath := path.Join(prefix, gvr.Group, gvr.Version, "namespaces", "default", resourceParts[0], "test", resourceParts[1])
 		obj := &unstructured.Unstructured{}
 
-		getData, err := clientSet.CoreV1().RESTClient().Get().AbsPath(urlPath).DoRaw()
+		getData, err := clientSet.CoreV1().RESTClient().Get().AbsPath(urlPath).DoRaw(context.TODO())
 		if err != nil {
 			t.Errorf("error fetching %s: %v", urlPath, err)
 			continue
@@ -162,7 +163,7 @@ func TestScaleSubresources(t *testing.T) {
 			continue
 		}
 
-		updateData, err := clientSet.CoreV1().RESTClient().Put().AbsPath(urlPath).Body(getData).DoRaw()
+		updateData, err := clientSet.CoreV1().RESTClient().Put().AbsPath(urlPath).Body(getData).DoRaw(context.TODO())
 		if err != nil {
 			t.Errorf("error putting to %s: %v", urlPath, err)
 			t.Log(string(getData))
@@ -202,21 +203,9 @@ var (
 )
 
 func setupWithOptions(t *testing.T, instanceOptions *apitesting.TestServerInstanceOptions, flags []string) (client kubernetes.Interface, tearDown func()) {
+	grpclog.SetLoggerV2(grpclog.NewLoggerV2(io.Discard, io.Discard, io.Discard))
+
 	result := apitesting.StartTestServerOrDie(t, instanceOptions, flags, framework.SharedEtcd())
-
-	// TODO: Disable logging here until we resolve teardown issues which result in
-	// massive log spam. Another path forward would be to refactor
-	// StartTestServerOrDie to work with the etcd instance already started by the
-	// integration test scripts.
-	// See https://github.com/kubernetes/kubernetes/issues/49489.
-	repo, err := capnslog.GetRepoLogger("go.etcd.io/etcd")
-	if err != nil {
-		t.Fatalf("couldn't configure logging: %v", err)
-	}
-	repo.SetLogLevel(map[string]capnslog.LogLevel{
-		"etcdserver/api/v3rpc": capnslog.CRITICAL,
-	})
-
 	result.ClientConfig.AcceptContentTypes = ""
 	result.ClientConfig.ContentType = ""
 	result.ClientConfig.NegotiatedSerializer = nil

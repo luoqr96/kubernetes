@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 )
 
@@ -32,8 +33,13 @@ type JoinData interface {
 	Cfg() *kubeadmapi.JoinConfiguration
 	TLSBootstrapCfg() (*clientcmdapi.Config, error)
 	InitCfg() (*kubeadmapi.InitConfiguration, error)
-	ClientSet() (*clientset.Clientset, error)
-	IgnorePreflightErrors() sets.String
+	Client() (clientset.Interface, error)
+	IgnorePreflightErrors() sets.Set[string]
 	OutputWriter() io.Writer
-	KustomizeDir() string
+	PatchesDir() string
+	DryRun() bool
+	KubeConfigDir() string
+	KubeletDir() string
+	ManifestDir() string
+	CertificateWriteDir() string
 }

@@ -19,10 +19,11 @@ package metrics
 import (
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	csitrans "k8s.io/csi-translation-lib"
@@ -97,6 +98,7 @@ func TestVolumesInUseMetricCollection(t *testing.T) {
 				v1.ResourceName(v1.ResourceStorage): resource.MustParse("5G"),
 			},
 			PersistentVolumeSource: v1.PersistentVolumeSource{
+				// Note that as GCE CSI Migration is completed, this is handled by the PD CSI plugin.
 				GCEPersistentDisk: &v1.GCEPersistentDiskVolumeSource{},
 			},
 			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce, v1.ReadOnlyMany},
@@ -117,14 +119,14 @@ func TestVolumesInUseMetricCollection(t *testing.T) {
 		nil,
 		nil,
 		fakeVolumePluginMgr,
-		csimigration.NewPluginManager(csiTranslator),
+		csimigration.NewPluginManager(csiTranslator, utilfeature.DefaultFeatureGate),
 		csiTranslator)
 	nodeUseMap := metricCollector.getVolumeInUseCount()
 	if len(nodeUseMap) < 1 {
 		t.Errorf("Expected one volume in use got %d", len(nodeUseMap))
 	}
 	testNodeMetric := nodeUseMap["metric-test-host"]
-	pluginUseCount, ok := testNodeMetric["fake-plugin"]
+	pluginUseCount, ok := testNodeMetric["fake-plugin:pd.csi.storage.gke.io"]
 	if !ok {
 		t.Errorf("Expected fake plugin pvc got nothing")
 	}
@@ -158,7 +160,7 @@ func TestTotalVolumesMetricCollection(t *testing.T) {
 		asw,
 		dsw,
 		fakeVolumePluginMgr,
-		csimigration.NewPluginManager(csiTranslator),
+		csimigration.NewPluginManager(csiTranslator, utilfeature.DefaultFeatureGate),
 		csiTranslator)
 
 	totalVolumesMap := metricCollector.getTotalVolumesCount()

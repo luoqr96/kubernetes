@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -28,7 +29,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/api/core/v1"
 )
@@ -49,9 +50,9 @@ func (i InstanceID) awsString() *string {
 
 // KubernetesInstanceID represents the id for an instance in the kubernetes API;
 // the following form
-//  * aws:///<zone>/<awsInstanceId>
-//  * aws:////<awsInstanceId>
-//  * <awsInstanceId>
+//   - aws:///<zone>/<awsInstanceId>
+//   - aws:////<awsInstanceId>
+//   - <awsInstanceId>
 type KubernetesInstanceID string
 
 // MapToAWSInstanceID extracts the InstanceID from the KubernetesInstanceID

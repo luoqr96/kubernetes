@@ -17,7 +17,9 @@ limitations under the License.
 package namespace
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
 	restclient "k8s.io/client-go/rest"
+	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/pkg/controller/namespace"
 	"k8s.io/kubernetes/test/integration/etcd"
 	"k8s.io/kubernetes/test/integration/framework"
@@ -42,11 +45,11 @@ func TestNamespaceCondition(t *testing.T) {
 	closeFn, nsController, informers, kubeClient, dynamicClient := namespaceLifecycleSetup(t)
 	defer closeFn()
 	nsName := "test-namespace-conditions"
-	_, err := kubeClient.CoreV1().Namespaces().Create(&corev1.Namespace{
+	_, err := kubeClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: nsName,
 		},
-	})
+	}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +65,7 @@ func TestNamespaceCondition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = dynamicClient.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(nsName).Create(podJSON, metav1.CreateOptions{})
+	_, err = dynamicClient.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(nsName).Create(context.TODO(), podJSON, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,17 +75,17 @@ func TestNamespaceCondition(t *testing.T) {
 		t.Fatal(err)
 	}
 	deploymentJSON.SetFinalizers([]string{"custom.io/finalizer"})
-	_, err = dynamicClient.Resource(appsv1.SchemeGroupVersion.WithResource("deployments")).Namespace(nsName).Create(deploymentJSON, metav1.CreateOptions{})
+	_, err = dynamicClient.Resource(appsv1.SchemeGroupVersion.WithResource("deployments")).Namespace(nsName).Create(context.TODO(), deploymentJSON, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = kubeClient.CoreV1().Namespaces().Delete(nsName, nil); err != nil {
+	if err = kubeClient.CoreV1().Namespaces().Delete(context.TODO(), nsName, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
 	err = wait.PollImmediate(1*time.Second, 60*time.Second, func() (bool, error) {
-		curr, err := kubeClient.CoreV1().Namespaces().Get(nsName, metav1.GetOptions{})
+		curr, err := kubeClient.CoreV1().Namespaces().Get(context.TODO(), nsName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -114,6 +117,46 @@ func TestNamespaceCondition(t *testing.T) {
 	}
 }
 
+// TestNamespaceLabels tests for default labels added in https://github.com/kubernetes/kubernetes/pull/96968
+func TestNamespaceLabels(t *testing.T) {
+	closeFn, nsController, _, kubeClient, _ := namespaceLifecycleSetup(t)
+	defer closeFn()
+
+	// Even though nscontroller isn't used in this test, its creation is already
+	// spawning some goroutines. So we need to run it to ensure they won't leak.
+	stopCh := make(chan struct{})
+	close(stopCh)
+	go nsController.Run(5, stopCh)
+
+	nsName := "test-namespace-labels-generated"
+	// Create a new namespace w/ no name
+	ns, err := kubeClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: nsName,
+		},
+	}, metav1.CreateOptions{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ns.Name != ns.Labels[corev1.LabelMetadataName] {
+		t.Fatal(fmt.Errorf("expected %q, got %q", ns.Name, ns.Labels[corev1.LabelMetadataName]))
+	}
+
+	nsList, err := kubeClient.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, ns := range nsList.Items {
+		if ns.Name != ns.Labels[corev1.LabelMetadataName] {
+			t.Fatal(fmt.Errorf("expected %q, got %q", ns.Name, ns.Labels[corev1.LabelMetadataName]))
+		}
+	}
+}
+
 // JSONToUnstructured converts a JSON stub to unstructured.Unstructured and
 // returns a dynamic resource client that can be used to interact with it
 func jsonToUnstructured(stub, version, kind string) (*unstructured.Unstructured, error) {
@@ -129,21 +172,21 @@ func jsonToUnstructured(stub, version, kind string) (*unstructured.Unstructured,
 	return &unstructured.Unstructured{Object: typeMetaAdder}, nil
 }
 
-func namespaceLifecycleSetup(t *testing.T) (framework.CloseFunc, *namespace.NamespaceController, informers.SharedInformerFactory, clientset.Interface, dynamic.Interface) {
-	masterConfig := framework.NewIntegrationTestMasterConfig()
-	_, s, closeFn := framework.RunAMaster(masterConfig)
+func namespaceLifecycleSetup(t *testing.T) (kubeapiservertesting.TearDownFunc, *namespace.NamespaceController, informers.SharedInformerFactory, clientset.Interface, dynamic.Interface) {
+	// Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{"--disable-admission-plugins=ServiceAccount"}, framework.SharedEtcd())
 
-	config := restclient.Config{Host: s.URL}
+	config := restclient.CopyConfig(server.ClientConfig)
 	config.QPS = 10000
 	config.Burst = 10000
-	clientSet, err := clientset.NewForConfig(&config)
+	clientSet, err := clientset.NewForConfig(config)
 	if err != nil {
 		t.Fatalf("error in create clientset: %v", err)
 	}
 	resyncPeriod := 12 * time.Hour
-	informers := informers.NewSharedInformerFactory(clientset.NewForConfigOrDie(restclient.AddUserAgent(&config, "deployment-informers")), resyncPeriod)
+	informers := informers.NewSharedInformerFactory(clientset.NewForConfigOrDie(restclient.AddUserAgent(config, "deployment-informers")), resyncPeriod)
 
-	metadataClient, err := metadata.NewForConfig(&config)
+	metadataClient, err := metadata.NewForConfig(config)
 	if err != nil {
 		panic(err)
 	}
@@ -157,8 +200,6 @@ func namespaceLifecycleSetup(t *testing.T) (framework.CloseFunc, *namespace.Name
 		informers.Core().V1().Namespaces(),
 		10*time.Hour,
 		corev1.FinalizerKubernetes)
-	if err != nil {
-		t.Fatalf("error creating Deployment controller: %v", err)
-	}
-	return closeFn, controller, informers, clientSet, dynamic.NewForConfigOrDie(&config)
+
+	return server.TearDownFn, controller, informers, clientSet, dynamic.NewForConfigOrDie(config)
 }

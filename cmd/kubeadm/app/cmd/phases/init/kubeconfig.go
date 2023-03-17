@@ -18,9 +18,12 @@ package phases
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/pkg/errors"
+
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
+	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
@@ -102,6 +105,7 @@ func getKubeConfigPhaseFlags(name string) []string {
 		options.CfgPath,
 		options.KubeconfigDir,
 		options.KubernetesVersion,
+		options.DryRun,
 	}
 	if name == "all" || name == kubeadmconstants.KubeletKubeConfigFileName {
 		flags = append(flags,
@@ -132,6 +136,13 @@ func runKubeConfigFile(kubeConfigFileName string) func(workflow.RunData) error {
 		// if external CA mode, skip certificate authority generation
 		if data.ExternalCA() {
 			fmt.Printf("[kubeconfig] External CA mode: Using user provided %s\n", kubeConfigFileName)
+			// If using an external CA while dryrun, copy kubeconfig files to dryrun dir for later use
+			if data.DryRun() {
+				err := phases.CopyFile(filepath.Join(kubeadmconstants.KubernetesDir, kubeConfigFileName), filepath.Join(data.KubeConfigDir(), kubeConfigFileName))
+				if err != nil {
+					return errors.Wrapf(err, "could not copy %s to dry run directory %s", kubeConfigFileName, data.KubeConfigDir())
+				}
+			}
 			return nil
 		}
 

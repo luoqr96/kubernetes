@@ -43,17 +43,20 @@ type GetContextsOptions struct {
 	showHeaders  bool
 	contextNames []string
 
+	outputFormat string
+	noHeaders    bool
+
 	genericclioptions.IOStreams
 }
 
 var (
-	getContextsLong = templates.LongDesc(`Displays one or many contexts from the kubeconfig file.`)
+	getContextsLong = templates.LongDesc(i18n.T(`Display one or many contexts from the kubeconfig file.`))
 
 	getContextsExample = templates.Examples(`
 		# List all the contexts in your kubeconfig file
 		kubectl config get-contexts
 
-		# Describe one context in your kubeconfig file.
+		# Describe one context in your kubeconfig file
 		kubectl config get-contexts my-context`)
 )
 
@@ -73,31 +76,26 @@ func NewCmdConfigGetContexts(streams genericclioptions.IOStreams, configAccess c
 		Long:                  getContextsLong,
 		Example:               getContextsExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			validOutputTypes := sets.NewString("", "json", "yaml", "wide", "name", "custom-columns", "custom-columns-file", "go-template", "go-template-file", "jsonpath", "jsonpath-file")
-			supportedOutputTypes := sets.NewString("", "name")
-			outputFormat := cmdutil.GetFlagString(cmd, "output")
-			if !validOutputTypes.Has(outputFormat) {
-				cmdutil.CheckErr(fmt.Errorf("output must be one of '' or 'name': %v", outputFormat))
-			}
-			if !supportedOutputTypes.Has(outputFormat) {
-				fmt.Fprintf(options.Out, "--output %v is not available in kubectl config get-contexts; resetting to default output format\n", outputFormat)
-				cmd.Flags().Set("output", "")
-			}
 			cmdutil.CheckErr(options.Complete(cmd, args))
+			cmdutil.CheckErr(options.Validate())
 			cmdutil.CheckErr(options.RunGetContexts())
 		},
 	}
 
-	cmd.Flags().Bool("no-headers", false, "When using the default or custom-column output format, don't print headers (default print headers).")
-	cmd.Flags().StringP("output", "o", "", "Output format. One of: name")
+	cmd.Flags().BoolVar(&options.noHeaders, "no-headers", options.noHeaders, "When using the default or custom-column output format, don't print headers (default print headers).")
+	cmd.Flags().StringVarP(&options.outputFormat, "output", "o", options.outputFormat, `Output format. One of: (name).`)
 	return cmd
 }
 
 // Complete assigns GetContextsOptions from the args.
 func (o *GetContextsOptions) Complete(cmd *cobra.Command, args []string) error {
+	supportedOutputTypes := sets.NewString("", "name")
+	if !supportedOutputTypes.Has(o.outputFormat) {
+		return fmt.Errorf("--output %v is not available in kubectl config get-contexts; resetting to default output format", o.outputFormat)
+	}
 	o.contextNames = args
 	o.nameOnly = false
-	if cmdutil.GetFlagString(cmd, "output") == "name" {
+	if o.outputFormat == "name" {
 		o.nameOnly = true
 	}
 	o.showHeaders = true
@@ -105,6 +103,11 @@ func (o *GetContextsOptions) Complete(cmd *cobra.Command, args []string) error {
 		o.showHeaders = false
 	}
 
+	return nil
+}
+
+// Validate ensures the of output format
+func (o *GetContextsOptions) Validate() error {
 	return nil
 }
 

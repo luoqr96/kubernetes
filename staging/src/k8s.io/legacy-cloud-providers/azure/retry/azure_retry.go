@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -26,7 +27,7 @@ import (
 
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/mocks"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // Ensure package autorest/mocks is imported and vendored.
@@ -58,6 +59,8 @@ type Backoff struct {
 	Cap time.Duration
 	// The errors indicate that the request shouldn't do more retrying.
 	NonRetriableErrors []string
+	// The RetriableHTTPStatusCodes indicates that the HTTPStatusCode should do more retrying.
+	RetriableHTTPStatusCodes []int
 }
 
 // NewBackoff creates a new Backoff.
@@ -75,6 +78,13 @@ func NewBackoff(duration time.Duration, factor float64, jitter float64, steps in
 func (b *Backoff) WithNonRetriableErrors(errs []string) *Backoff {
 	newBackoff := *b
 	newBackoff.NonRetriableErrors = errs
+	return &newBackoff
+}
+
+// WithRetriableHTTPStatusCodes returns a new *Backoff with RetriableHTTPStatusCode assigned.
+func (b *Backoff) WithRetriableHTTPStatusCodes(httpStatusCodes []int) *Backoff {
+	newBackoff := *b
+	newBackoff.RetriableHTTPStatusCodes = httpStatusCodes
 	return &newBackoff
 }
 
@@ -135,7 +145,7 @@ func jitter(duration time.Duration, maxFactor float64) time.Duration {
 	return wait
 }
 
-// DoExponentialBackoffRetry reprents an autorest.SendDecorator with backoff retry.
+// DoExponentialBackoffRetry represents an autorest.SendDecorator with backoff retry.
 func DoExponentialBackoffRetry(backoff *Backoff) autorest.SendDecorator {
 	return func(s autorest.Sender) autorest.Sender {
 		return autorest.SenderFunc(func(r *http.Request) (*http.Response, error) {
@@ -154,7 +164,7 @@ func doBackoffRetry(s autorest.Sender, r *http.Request, backoff *Backoff) (resp 
 			return
 		}
 		resp, err = s.Do(rr.Request())
-		rerr := GetError(resp, err)
+		rerr := GetErrorWithRetriableHTTPStatusCodes(resp, err, backoff.RetriableHTTPStatusCodes)
 		// Abort retries in the following scenarios:
 		// 1) request succeed
 		// 2) request is not retriable

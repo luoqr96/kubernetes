@@ -152,7 +152,7 @@ only this superuser group is authorized.
 
    ``` shell
    openssl req -out client.csr -new -newkey rsa:4096 -nodes -keyout client.key -subj "/CN=development/O=system:masters"
-   openssl x509 -req -days 365 -in client.csr -CA ca.crt -CAkey ca.key -set_serial 01 -out client.crt
+   openssl x509 -req -days 365 -in client.csr -CA ca.crt -CAkey ca.key -set_serial 01 -sha256 -out client.crt
    ```
 
 3. As curl requires client certificates in p12 format with password, do the conversion:
@@ -186,7 +186,7 @@ only this superuser group is authorized.
 5. Use curl to access the server using the client certificate in p12 format for authentication:
 
    ``` shell
-   curl -fv -k --cert client.p12:password \
+   curl -fv -k --cert-type P12 --cert client.p12:password \
       https://localhost:8443/apis/wardle.example.com/v1alpha1/namespaces/default/flunders
    ```
 
@@ -203,3 +203,4 @@ only this superuser group is authorized.
    http --verify=no --cert client.crt --cert-key client.key \
       https://localhost:8443/apis/wardle.example.com/v1alpha1/namespaces/default/flunders
    ```
+

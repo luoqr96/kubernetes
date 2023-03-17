@@ -17,18 +17,19 @@ limitations under the License.
 package kubelet
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
-	"k8s.io/utils/mount"
+	"k8s.io/mount-utils"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	utiltesting "k8s.io/client-go/util/testing"
@@ -44,29 +45,36 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/server/stats"
 	"k8s.io/kubernetes/pkg/kubelet/status"
 	statustest "k8s.io/kubernetes/pkg/kubelet/status/testing"
+	kubeletutil "k8s.io/kubernetes/pkg/kubelet/util"
 	"k8s.io/kubernetes/pkg/kubelet/volumemanager"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
+	"k8s.io/utils/clock"
 )
 
 func TestRunOnce(t *testing.T) {
-	cadvisor := &cadvisortest.Mock{}
-	cadvisor.On("MachineInfo").Return(&cadvisorapi.MachineInfo{}, nil)
-	cadvisor.On("ImagesFsInfo").Return(cadvisorapiv2.FsInfo{
+	ctx := context.Background()
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	cadvisor := cadvisortest.NewMockInterface(mockCtrl)
+	cadvisor.EXPECT().MachineInfo().Return(&cadvisorapi.MachineInfo{}, nil).AnyTimes()
+	cadvisor.EXPECT().ImagesFsInfo().Return(cadvisorapiv2.FsInfo{
 		Usage:     400,
 		Capacity:  1000,
 		Available: 600,
-	}, nil)
-	cadvisor.On("RootFsInfo").Return(cadvisorapiv2.FsInfo{
+	}, nil).AnyTimes()
+	cadvisor.EXPECT().RootFsInfo().Return(cadvisorapiv2.FsInfo{
 		Usage:    9,
 		Capacity: 10,
-	}, nil)
+	}, nil).AnyTimes()
 	fakeSecretManager := secret.NewFakeManager()
 	fakeConfigMapManager := configmap.NewFakeManager()
 	podManager := kubepod.NewBasicPodManager(
-		podtest.NewFakeMirrorClient(), fakeSecretManager, fakeConfigMapManager, podtest.NewMockCheckpointManager())
+		podtest.NewFakeMirrorClient())
 	fakeRuntime := &containertest.FakeRuntime{}
+	podStartupLatencyTracker := kubeletutil.NewPodStartupLatencyTracker()
 	basePath, err := utiltesting.MkTmpdir("kubelet")
 	if err != nil {
 		t.Fatalf("can't make a temp rootdir %v", err)
@@ -77,8 +85,9 @@ func TestRunOnce(t *testing.T) {
 		recorder:         &record.FakeRecorder{},
 		cadvisor:         cadvisor,
 		nodeLister:       testNodeLister{},
-		statusManager:    status.NewManager(nil, podManager, &statustest.FakePodDeletionSafetyProvider{}),
+		statusManager:    status.NewManager(nil, podManager, &statustest.FakePodDeletionSafetyProvider{}, podStartupLatencyTracker),
 		podManager:       podManager,
+		podWorkers:       &fakePodWorkers{},
 		os:               &containertest.FakeOS{},
 		containerRuntime: fakeRuntime,
 		reasonCache:      NewReasonCache(),
@@ -101,7 +110,7 @@ func TestRunOnce(t *testing.T) {
 		true,
 		kb.nodeName,
 		kb.podManager,
-		kb.statusManager,
+		kb.podWorkers,
 		kb.kubeClient,
 		kb.volumePluginMgr,
 		fakeRuntime,
@@ -109,24 +118,23 @@ func TestRunOnce(t *testing.T) {
 		kb.hostutil,
 		kb.getPodsDir(),
 		kb.recorder,
-		false, /* experimentalCheckNodeCapabilitiesBeforeMount */
 		false, /* keepTerminatedPodVolumes */
 		volumetest.NewBlockVolumePathHandler())
 
-	// TODO: Factor out "StatsProvider" from Kubelet so we don't have a cyclic dependency
+	// TODO: Factor out "stats.Provider" from Kubelet so we don't have a cyclic dependency
 	volumeStatsAggPeriod := time.Second * 10
-	kb.resourceAnalyzer = stats.NewResourceAnalyzer(kb, volumeStatsAggPeriod)
+	kb.resourceAnalyzer = stats.NewResourceAnalyzer(kb, volumeStatsAggPeriod, kb.recorder)
 	nodeRef := &v1.ObjectReference{
 		Kind:      "Node",
 		Name:      string(kb.nodeName),
 		UID:       types.UID(kb.nodeName),
 		Namespace: "",
 	}
-	fakeKillPodFunc := func(pod *v1.Pod, podStatus v1.PodStatus, gracePeriodOverride *int64) error {
+	fakeKillPodFunc := func(pod *v1.Pod, evict bool, gracePeriodOverride *int64, fn func(*v1.PodStatus)) error {
 		return nil
 	}
 	fakeMirrodPodFunc := func(*v1.Pod) (*v1.Pod, bool) { return nil, false }
-	evictionManager, evictionAdmitHandler := eviction.NewManager(kb.resourceAnalyzer, eviction.Config{}, fakeKillPodFunc, fakeMirrodPodFunc, nil, nil, kb.recorder, nodeRef, kb.clock)
+	evictionManager, evictionAdmitHandler := eviction.NewManager(kb.resourceAnalyzer, eviction.Config{}, fakeKillPodFunc, fakeMirrodPodFunc, nil, nil, kb.recorder, nodeRef, kb.clock, kb.supportLocalStorageCapacityIsolation())
 
 	kb.evictionManager = evictionManager
 	kb.admitHandlers.AddPodAdmitHandler(evictionAdmitHandler)
@@ -157,14 +165,14 @@ func TestRunOnce(t *testing.T) {
 	// because runonce is never used in kubernetes now, we should deprioritize the cleanup work.
 	// TODO(random-liu) Fix the test, make it meaningful.
 	fakeRuntime.PodStatus = kubecontainer.PodStatus{
-		ContainerStatuses: []*kubecontainer.ContainerStatus{
+		ContainerStatuses: []*kubecontainer.Status{
 			{
 				Name:  "bar",
 				State: kubecontainer.ContainerStateRunning,
 			},
 		},
 	}
-	results, err := kb.runOnce(pods, time.Millisecond)
+	results, err := kb.runOnce(ctx, pods, time.Millisecond)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}

@@ -23,12 +23,12 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/wait"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 func TestSimpleQueue(t *testing.T) {
-	fakeClock := clock.NewFakeClock(time.Now())
+	fakeClock := testingclock.NewFakeClock(time.Now())
 	q := NewDelayingQueueWithCustomClock(fakeClock, "")
 
 	first := "foo"
@@ -70,7 +70,7 @@ func TestSimpleQueue(t *testing.T) {
 }
 
 func TestDeduping(t *testing.T) {
-	fakeClock := clock.NewFakeClock(time.Now())
+	fakeClock := testingclock.NewFakeClock(time.Now())
 	q := NewDelayingQueueWithCustomClock(fakeClock, "")
 
 	first := "foo"
@@ -123,13 +123,10 @@ func TestDeduping(t *testing.T) {
 	if q.Len() != 0 {
 		t.Errorf("should not have added")
 	}
-	if q.Len() != 0 {
-		t.Errorf("should not have added")
-	}
 }
 
 func TestAddTwoFireEarly(t *testing.T) {
-	fakeClock := clock.NewFakeClock(time.Now())
+	fakeClock := testingclock.NewFakeClock(time.Now())
 	q := NewDelayingQueueWithCustomClock(fakeClock, "")
 
 	first := "foo"
@@ -178,7 +175,7 @@ func TestAddTwoFireEarly(t *testing.T) {
 }
 
 func TestCopyShifting(t *testing.T) {
-	fakeClock := clock.NewFakeClock(time.Now())
+	fakeClock := testingclock.NewFakeClock(time.Now())
 	q := NewDelayingQueueWithCustomClock(fakeClock, "")
 
 	first := "foo"
@@ -216,7 +213,7 @@ func TestCopyShifting(t *testing.T) {
 }
 
 func BenchmarkDelayingQueue_AddAfter(b *testing.B) {
-	fakeClock := clock.NewFakeClock(time.Now())
+	fakeClock := testingclock.NewFakeClock(time.Now())
 	q := NewDelayingQueueWithCustomClock(fakeClock, "")
 
 	// Add items

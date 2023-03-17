@@ -21,7 +21,6 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
-	"io/ioutil"
 	"net"
 	"os"
 	"path"
@@ -31,19 +30,24 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	certstestutil "k8s.io/kubernetes/cmd/kubeadm/app/util/certs"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
+	pkiutiltesting "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil/testing"
 	testutil "k8s.io/kubernetes/cmd/kubeadm/test"
 )
 
 func createTestCSR(t *testing.T) (*x509.CertificateRequest, crypto.Signer) {
 	csr, key, err := pkiutil.NewCSRAndKey(
-		&certutil.Config{
-			CommonName: "testCert",
+		&pkiutil.CertConfig{
+			Config: certutil.Config{
+				CommonName: "testCert",
+			},
 		})
 	if err != nil {
 		t.Fatalf("couldn't create test cert: %v", err)
@@ -259,7 +263,7 @@ func TestWriteCSRFilesIfNotExist(t *testing.T) {
 		{
 			name: "existing CSR is garbage",
 			setupFunc: func(csrPath string) error {
-				return ioutil.WriteFile(path.Join(csrPath, "dummy.csr"), []byte("a--bunch--of-garbage"), os.ModePerm)
+				return os.WriteFile(path.Join(csrPath, "dummy.csr"), []byte("a--bunch--of-garbage"), os.ModePerm)
 			},
 			expectedError: true,
 		},
@@ -344,7 +348,7 @@ func TestCreateServiceAccountKeyAndPublicKeyFiles(t *testing.T) {
 				}
 			}
 
-			err := CreateServiceAccountKeyAndPublicKeyFiles(dir)
+			err := CreateServiceAccountKeyAndPublicKeyFiles(dir, x509.RSA)
 			if (err != nil) != tt.expectedErr {
 				t.Fatalf("expected error: %v, got: %v, error: %v", tt.expectedErr, err != nil, err)
 			} else if tt.expectedErr {
@@ -369,9 +373,9 @@ func TestSharedCertificateExists(t *testing.T) {
 	publicKey := key.Public()
 
 	var tests = []struct {
-		name          string
-		files         certstestutil.PKIFiles
-		expectedError bool
+		name           string
+		files          certstestutil.PKIFiles
+		expectedErrors int
 	}{
 		{
 			name: "success",
@@ -397,7 +401,19 @@ func TestSharedCertificateExists(t *testing.T) {
 				"etcd/ca.crt":        caCert,
 				"etcd/ca.key":        caKey,
 			},
-			expectedError: true,
+			expectedErrors: 1,
+		},
+		{
+			name: "missing ca.key",
+			files: certstestutil.PKIFiles{
+				"ca.crt":             caCert,
+				"front-proxy-ca.crt": caCert,
+				"front-proxy-ca.key": caKey,
+				"sa.pub":             publicKey,
+				"sa.key":             key,
+				"etcd/ca.crt":        caCert,
+				"etcd/ca.key":        caKey,
+			},
 		},
 		{
 			name: "missing sa.key",
@@ -410,7 +426,7 @@ func TestSharedCertificateExists(t *testing.T) {
 				"etcd/ca.crt":        caCert,
 				"etcd/ca.key":        caKey,
 			},
-			expectedError: true,
+			expectedErrors: 1,
 		},
 		{
 			name: "missing front-proxy.crt",
@@ -423,20 +439,32 @@ func TestSharedCertificateExists(t *testing.T) {
 				"etcd/ca.crt":        caCert,
 				"etcd/ca.key":        caKey,
 			},
-			expectedError: true,
+			expectedErrors: 1,
 		},
 		{
 			name: "missing etcd/ca.crt",
 			files: certstestutil.PKIFiles{
 				"ca.crt":             caCert,
 				"ca.key":             caKey,
+				"front-proxy-ca.crt": caCert,
 				"front-proxy-ca.key": caKey,
 				"sa.pub":             publicKey,
 				"sa.key":             key,
-				"etcd/ca.crt":        caCert,
 				"etcd/ca.key":        caKey,
 			},
-			expectedError: true,
+			expectedErrors: 1,
+		},
+		{
+			name: "missing multiple certs (ca.crt and etcd/ca.crt)",
+			files: certstestutil.PKIFiles{
+				"ca.key":             caKey,
+				"front-proxy-ca.crt": caCert,
+				"front-proxy-ca.key": caKey,
+				"sa.pub":             publicKey,
+				"sa.key":             key,
+				"etcd/ca.key":        caKey,
+			},
+			expectedErrors: 2,
 		},
 	}
 
@@ -455,12 +483,13 @@ func TestSharedCertificateExists(t *testing.T) {
 
 			// executes create func
 			ret, err := SharedCertificateExists(cfg)
-
 			switch {
-			case !test.expectedError && err != nil:
-				t.Errorf("error SharedCertificateExists failed when not expected to fail: %v", err)
-			case test.expectedError && err == nil:
-				t.Errorf("error SharedCertificateExists didn't failed when expected")
+			case err != nil:
+				if agg, ok := err.(utilerrors.Aggregate); ok && len(agg.Errors()) != test.expectedErrors {
+					t.Errorf("SharedCertificateExists didn't fail with the expected number of errors, expected: %v, got: %v", test.expectedErrors, len(agg.Errors()))
+				}
+			case err == nil && test.expectedErrors != 0:
+				t.Errorf("error SharedCertificateExists didn't fail when expected")
 			case ret != (err == nil):
 				t.Errorf("error SharedCertificateExists returned %v when expected to return %v", ret, err == nil)
 			}
@@ -471,6 +500,8 @@ func TestSharedCertificateExists(t *testing.T) {
 func TestCreatePKIAssetsWithSparseCerts(t *testing.T) {
 	for _, test := range certstestutil.GetSparseCertTestCases(t) {
 		t.Run(test.Name, func(t *testing.T) {
+			pkiutiltesting.Reset()
+
 			tmpdir := testutil.SetupTempDir(t)
 			defer os.RemoveAll(tmpdir)
 
@@ -572,6 +603,8 @@ func TestUsingExternalCA(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			pkiutiltesting.Reset()
+
 			dir := testutil.SetupTempDir(t)
 			defer os.RemoveAll(dir)
 
@@ -640,7 +673,7 @@ func TestValidateMethods(t *testing.T) {
 			name:            "validateCACertAndKey (key missing)",
 			validateFunc:    validateCACertAndKey,
 			loc:             certKeyLocation{caBaseName: "ca", baseName: "", uxName: "CA"},
-			expectedSuccess: false,
+			expectedSuccess: true,
 		},
 		{
 			name: "validateSignedCert",
@@ -664,6 +697,15 @@ func TestValidateMethods(t *testing.T) {
 			loc:             certKeyLocation{baseName: "sa", uxName: "service account"},
 			expectedSuccess: true,
 		},
+		{
+			name: "validatePrivatePublicKey (missing key)",
+			files: certstestutil.PKIFiles{
+				"sa.pub": key.Public(),
+			},
+			validateFunc:    validatePrivatePublicKey,
+			loc:             certKeyLocation{baseName: "sa", uxName: "service account"},
+			expectedSuccess: false,
+		},
 	}
 
 	for _, test := range tests {
@@ -683,7 +725,7 @@ func TestValidateMethods(t *testing.T) {
 }
 
 func TestNewCSR(t *testing.T) {
-	kubeadmCert := KubeadmCertAPIServer
+	kubeadmCert := KubeadmCertAPIServer()
 	cfg := testutil.GetDefaultInternalConfig(t)
 
 	certConfig, err := kubeadmCert.GetConfig(cfg)
@@ -691,7 +733,7 @@ func TestNewCSR(t *testing.T) {
 		t.Fatalf("couldn't get cert config: %v", err)
 	}
 
-	csr, _, err := NewCSR(&kubeadmCert, cfg)
+	csr, _, err := NewCSR(kubeadmCert, cfg)
 
 	if err != nil {
 		t.Errorf("invalid signature on CSR: %v", err)
@@ -752,6 +794,8 @@ func TestCreateCertificateFilesMethods(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		pkiutiltesting.Reset()
+
 		// Create temp folder for the test case
 		tmpdir := testutil.SetupTempDir(t)
 		defer os.RemoveAll(tmpdir)

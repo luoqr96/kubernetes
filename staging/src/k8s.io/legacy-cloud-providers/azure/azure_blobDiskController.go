@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -32,14 +33,15 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2019-06-01/storage"
 	azstorage "github.com/Azure/azure-sdk-for-go/storage"
-	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/rubiojr/go-vhd/vhd"
 
 	kwait "k8s.io/apimachinery/pkg/util/wait"
 	volerr "k8s.io/cloud-provider/volume/errors"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/pointer"
 )
 
+// Attention: blob disk feature is deprecated
 const (
 	vhdContainerName         = "vhds"
 	useHTTPSForBlobBasedDisk = true
@@ -55,7 +57,7 @@ type storageAccountState struct {
 	defaultContainerCreated bool
 }
 
-//BlobDiskController : blob disk controller struct
+// BlobDiskController : blob disk controller struct
 type BlobDiskController struct {
 	common   *controllerCommon
 	accounts map[string]*storageAccountState
@@ -84,7 +86,15 @@ func (c *BlobDiskController) initStorageAccounts() {
 // If no storage account is given, search all the storage accounts associated with the resource group and pick one that
 // fits storage type and location.
 func (c *BlobDiskController) CreateVolume(blobName, accountName, accountType, location string, requestGB int) (string, string, int, error) {
-	account, key, err := c.common.cloud.EnsureStorageAccount(accountName, accountType, string(defaultStorageAccountKind), c.common.resourceGroup, location, dedicatedDiskAccountNamePrefix)
+	accountOptions := &AccountOptions{
+		Name:                   accountName,
+		Type:                   accountType,
+		Kind:                   string(defaultStorageAccountKind),
+		ResourceGroup:          c.common.resourceGroup,
+		Location:               location,
+		EnableHTTPSTrafficOnly: true,
+	}
+	account, key, err := c.common.cloud.EnsureStorageAccount(accountOptions, dedicatedDiskAccountNamePrefix)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("could not get storage key for storage account %s: %v", accountName, err)
 	}
@@ -217,7 +227,7 @@ func (c *BlobDiskController) deleteVhdBlob(accountName, accountKey, blobName str
 	return blob.Delete(nil)
 }
 
-//CreateBlobDisk : create a blob disk in a node
+// CreateBlobDisk : create a blob disk in a node
 func (c *BlobDiskController) CreateBlobDisk(dataDiskName string, storageAccountType storage.SkuName, sizeGB int) (string, error) {
 	klog.V(4).Infof("azureDisk - creating blob data disk named:%s on StorageAccountType:%s", dataDiskName, storageAccountType)
 
@@ -243,9 +253,9 @@ func (c *BlobDiskController) CreateBlobDisk(dataDiskName string, storageAccountT
 	return diskURI, nil
 }
 
-//DeleteBlobDisk : delete a blob disk from a node
+// DeleteBlobDisk : delete a blob disk from a node
 func (c *BlobDiskController) DeleteBlobDisk(diskURI string) error {
-	storageAccountName, vhdName, err := diskNameandSANameFromURI(diskURI)
+	storageAccountName, vhdName, err := diskNameAndSANameFromURI(diskURI)
 	if err != nil {
 		return err
 	}
@@ -344,7 +354,7 @@ func (c *BlobDiskController) ensureDefaultContainer(storageAccountName string) e
 	}
 
 	// account exists but not ready yet
-	if provisionState != storage.ProvisioningStateSucceeded {
+	if provisionState != storage.Succeeded {
 		// we don't want many attempts to validate the account readiness
 		// here hence we are locking
 		counter := 1
@@ -375,7 +385,7 @@ func (c *BlobDiskController) ensureDefaultContainer(storageAccountName string) e
 				return false, nil // error performing the query - retryable
 			}
 
-			if provisionState == storage.ProvisioningStateSucceeded {
+			if provisionState == storage.Succeeded {
 				return true, nil
 			}
 
@@ -459,13 +469,13 @@ func (c *BlobDiskController) getAllStorageAccounts() (map[string]*storageAccount
 		}
 		klog.Infof("azureDisk - identified account %s as part of shared PVC accounts", *v.Name)
 
-		sastate := &storageAccountState{
+		saState := &storageAccountState{
 			name:      *v.Name,
 			saType:    (*v.Sku).Name,
 			diskCount: -1,
 		}
 
-		accounts[*v.Name] = sastate
+		accounts[*v.Name] = saState
 	}
 
 	return accounts, nil
@@ -494,14 +504,14 @@ func (c *BlobDiskController) createStorageAccount(storageAccountName string, sto
 			Sku: &storage.Sku{Name: storageAccountType},
 			// switch to use StorageV2 as it's recommended according to https://docs.microsoft.com/en-us/azure/storage/common/storage-account-options
 			Kind:     defaultStorageAccountKind,
-			Tags:     map[string]*string{"created-by": to.StringPtr("azure-dd")},
+			Tags:     map[string]*string{"created-by": pointer.String("azure-dd")},
 			Location: &location}
 		ctx, cancel := getContextWithCancel()
 		defer cancel()
 
 		err := c.common.cloud.StorageAccountClient.Create(ctx, c.common.resourceGroup, storageAccountName, cp)
 		if err != nil {
-			return fmt.Errorf(fmt.Sprintf("Create Storage Account: %s, error: %v", storageAccountName, err))
+			return fmt.Errorf("Create Storage Account: %s, error: %v", storageAccountName, err)
 		}
 
 		newAccountState := &storageAccountState{
@@ -569,7 +579,7 @@ func (c *BlobDiskController) findSANameForDisk(storageAccountType storage.SkuNam
 	disksAfter := totalDiskCounts + 1 // with the new one!
 
 	avgUtilization := float64(disksAfter) / float64(countAccounts*maxDisksPerStorageAccounts)
-	aboveAvg := (avgUtilization > storageAccountUtilizationBeforeGrowing)
+	aboveAvg := avgUtilization > storageAccountUtilizationBeforeGrowing
 
 	// avg are not create and we should create more accounts if we can
 	if aboveAvg && countAccounts < maxStorageAccounts {
@@ -592,7 +602,7 @@ func (c *BlobDiskController) findSANameForDisk(storageAccountType storage.SkuNam
 	return SAName, nil
 }
 
-//Gets storage account exist, provisionStatus, Error if any
+// Gets storage account exist, provisionStatus, Error if any
 func (c *BlobDiskController) getStorageAccountState(storageAccountName string) (bool, storage.ProvisioningState, error) {
 	ctx, cancel := getContextWithCancel()
 	defer cancel()
@@ -622,7 +632,7 @@ func createVHDHeader(size uint64) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func diskNameandSANameFromURI(diskURI string) (string, string, error) {
+func diskNameAndSANameFromURI(diskURI string) (string, string, error) {
 	uri, err := url.Parse(diskURI)
 	if err != nil {
 		return "", "", err

@@ -22,10 +22,11 @@ import (
 	"math/rand"
 	"reflect"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -33,6 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/utils/clock"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 var nevererrc chan error
@@ -135,8 +138,7 @@ func TestReflectorWatchHandlerError(t *testing.T) {
 	go func() {
 		fw.Stop()
 	}()
-	var resumeRV string
-	err := g.watchHandler(fw, &resumeRV, nevererrc, wait.NeverStop)
+	err := watchHandler(time.Now(), fw, s, g.expectedType, g.expectedGVK, g.name, g.typeDescription, g.setLastSyncResourceVersion, g.clock, nevererrc, wait.NeverStop)
 	if err == nil {
 		t.Errorf("unexpected non-error")
 	}
@@ -155,8 +157,7 @@ func TestReflectorWatchHandler(t *testing.T) {
 		fw.Add(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "baz", ResourceVersion: "32"}})
 		fw.Stop()
 	}()
-	var resumeRV string
-	err := g.watchHandler(fw, &resumeRV, nevererrc, wait.NeverStop)
+	err := watchHandler(time.Now(), fw, s, g.expectedType, g.expectedGVK, g.name, g.typeDescription, g.setLastSyncResourceVersion, g.clock, nevererrc, wait.NeverStop)
 	if err != nil {
 		t.Errorf("unexpected error %v", err)
 	}
@@ -188,7 +189,7 @@ func TestReflectorWatchHandler(t *testing.T) {
 	}
 
 	// RV should send the last version we see.
-	if e, a := "32", resumeRV; e != a {
+	if e, a := "32", g.LastSyncResourceVersion(); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 
@@ -202,10 +203,9 @@ func TestReflectorStopWatch(t *testing.T) {
 	s := NewStore(MetaNamespaceKeyFunc)
 	g := NewReflector(&testLW{}, &v1.Pod{}, s, 0)
 	fw := watch.NewFake()
-	var resumeRV string
 	stopWatch := make(chan struct{}, 1)
 	stopWatch <- struct{}{}
-	err := g.watchHandler(fw, &resumeRV, nevererrc, stopWatch)
+	err := watchHandler(time.Now(), fw, s, g.expectedType, g.expectedGVK, g.name, g.typeDescription, g.setLastSyncResourceVersion, g.clock, nevererrc, stopWatch)
 	if err != errorStopRequested {
 		t.Errorf("expected stop error, got %q", err)
 	}
@@ -358,6 +358,208 @@ func TestReflectorListAndWatchWithErrors(t *testing.T) {
 	}
 }
 
+func TestReflectorListAndWatchInitConnBackoff(t *testing.T) {
+	maxBackoff := 50 * time.Millisecond
+	table := []struct {
+		numConnFails  int
+		expLowerBound time.Duration
+		expUpperBound time.Duration
+	}{
+		{5, 32 * time.Millisecond, 64 * time.Millisecond}, // case where maxBackoff is not hit, time should grow exponentially
+		{40, 35 * 2 * maxBackoff, 40 * 2 * maxBackoff},    // case where maxBoff is hit, backoff time should flatten
+
+	}
+	for _, test := range table {
+		t.Run(fmt.Sprintf("%d connection failures takes at least %d ms", test.numConnFails, 1<<test.numConnFails),
+			func(t *testing.T) {
+				stopCh := make(chan struct{})
+				connFails := test.numConnFails
+				fakeClock := testingclock.NewFakeClock(time.Unix(0, 0))
+				bm := wait.NewExponentialBackoffManager(time.Millisecond, maxBackoff, 100*time.Millisecond, 2.0, 1.0, fakeClock)
+				done := make(chan struct{})
+				defer close(done)
+				go func() {
+					i := 0
+					for {
+						select {
+						case <-done:
+							return
+						default:
+						}
+						if fakeClock.HasWaiters() {
+							step := (1 << (i + 1)) * time.Millisecond
+							if step > maxBackoff*2 {
+								step = maxBackoff * 2
+							}
+							fakeClock.Step(step)
+							i++
+						}
+						time.Sleep(100 * time.Microsecond)
+					}
+				}()
+				lw := &testLW{
+					WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+						if connFails > 0 {
+							connFails--
+							return nil, syscall.ECONNREFUSED
+						}
+						close(stopCh)
+						return watch.NewFake(), nil
+					},
+					ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+						return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "1"}}, nil
+					},
+				}
+				r := &Reflector{
+					name:                   "test-reflector",
+					listerWatcher:          lw,
+					store:                  NewFIFO(MetaNamespaceKeyFunc),
+					initConnBackoffManager: bm,
+					clock:                  fakeClock,
+					watchErrorHandler:      WatchErrorHandler(DefaultWatchErrorHandler),
+				}
+				start := fakeClock.Now()
+				err := r.ListAndWatch(stopCh)
+				elapsed := fakeClock.Since(start)
+				if err != nil {
+					t.Errorf("unexpected error %v", err)
+				}
+				if elapsed < (test.expLowerBound) {
+					t.Errorf("expected lower bound of ListAndWatch: %v, got %v", test.expLowerBound, elapsed)
+				}
+				if elapsed > (test.expUpperBound) {
+					t.Errorf("expected upper bound of ListAndWatch: %v, got %v", test.expUpperBound, elapsed)
+				}
+			})
+	}
+}
+
+type fakeBackoff struct {
+	clock clock.Clock
+	calls int
+}
+
+func (f *fakeBackoff) Backoff() clock.Timer {
+	f.calls++
+	return f.clock.NewTimer(time.Duration(0))
+}
+
+func TestBackoffOnTooManyRequests(t *testing.T) {
+	err := apierrors.NewTooManyRequests("too many requests", 1)
+	clock := &clock.RealClock{}
+	bm := &fakeBackoff{clock: clock}
+
+	lw := &testLW{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "1"}}, nil
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			switch bm.calls {
+			case 0:
+				return nil, err
+			case 1:
+				w := watch.NewFakeWithChanSize(1, false)
+				status := err.Status()
+				w.Error(&status)
+				return w, nil
+			default:
+				w := watch.NewFake()
+				w.Stop()
+				return w, nil
+			}
+		},
+	}
+
+	r := &Reflector{
+		name:                   "test-reflector",
+		listerWatcher:          lw,
+		store:                  NewFIFO(MetaNamespaceKeyFunc),
+		initConnBackoffManager: bm,
+		clock:                  clock,
+		watchErrorHandler:      WatchErrorHandler(DefaultWatchErrorHandler),
+	}
+
+	stopCh := make(chan struct{})
+	r.ListAndWatch(stopCh)
+	close(stopCh)
+	if bm.calls != 2 {
+		t.Errorf("unexpected watch backoff calls: %d", bm.calls)
+	}
+}
+
+func TestRetryInternalError(t *testing.T) {
+	testCases := []struct {
+		name                string
+		maxInternalDuration time.Duration
+		rewindTime          int
+		wantRetries         int
+	}{
+		{
+			name:                "retries off",
+			maxInternalDuration: time.Duration(0),
+			wantRetries:         0,
+		},
+		{
+			name:                "retries on, all calls fail",
+			maxInternalDuration: time.Second * 30,
+			wantRetries:         31,
+		},
+		{
+			name:                "retries on, one call successful",
+			maxInternalDuration: time.Second * 30,
+			rewindTime:          10,
+			wantRetries:         40,
+		},
+	}
+
+	for _, tc := range testCases {
+		err := apierrors.NewInternalError(fmt.Errorf("etcdserver: no leader"))
+		fakeClock := testingclock.NewFakeClock(time.Now())
+		bm := &fakeBackoff{clock: fakeClock}
+
+		counter := 0
+
+		lw := &testLW{
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "1"}}, nil
+			},
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				counter = counter + 1
+				t.Logf("Counter: %v", counter)
+				if counter == tc.rewindTime {
+					t.Logf("Rewinding")
+					fakeClock.Step(time.Minute)
+				}
+
+				fakeClock.Step(time.Second)
+				w := watch.NewFakeWithChanSize(1, false)
+				status := err.Status()
+				w.Error(&status)
+				return w, nil
+			},
+		}
+
+		r := &Reflector{
+			name:                   "test-reflector",
+			listerWatcher:          lw,
+			store:                  NewFIFO(MetaNamespaceKeyFunc),
+			initConnBackoffManager: bm,
+			clock:                  fakeClock,
+			watchErrorHandler:      WatchErrorHandler(DefaultWatchErrorHandler),
+		}
+
+		r.MaxInternalErrorRetryDuration = tc.maxInternalDuration
+
+		stopCh := make(chan struct{})
+		r.ListAndWatch(stopCh)
+		close(stopCh)
+
+		if counter-1 != tc.wantRetries {
+			t.Errorf("%v unexpected number of retries: %d", tc, counter-1)
+		}
+	}
+}
+
 func TestReflectorResync(t *testing.T) {
 	iteration := 0
 	stopCh := make(chan struct{})
@@ -425,12 +627,100 @@ func TestReflectorWatchListPageSize(t *testing.T) {
 		},
 	}
 	r := NewReflector(lw, &v1.Pod{}, s, 0)
+	// Set resource version to test pagination also for not consistent reads.
+	r.setLastSyncResourceVersion("10")
 	// Set the reflector to paginate the list request in 4 item chunks.
 	r.WatchListPageSize = 4
 	r.ListAndWatch(stopCh)
 
 	results := s.List()
 	if len(results) != 10 {
+		t.Errorf("Expected 10 results, got %d", len(results))
+	}
+}
+
+func TestReflectorNotPaginatingNotConsistentReads(t *testing.T) {
+	stopCh := make(chan struct{})
+	s := NewStore(MetaNamespaceKeyFunc)
+
+	lw := &testLW{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			// Stop once the reflector begins watching since we're only interested in the list.
+			close(stopCh)
+			fw := watch.NewFake()
+			return fw, nil
+		},
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			if options.ResourceVersion != "10" {
+				t.Fatalf("Expected ResourceVersion: \"10\", got: %s", options.ResourceVersion)
+			}
+			if options.Limit != 0 {
+				t.Fatalf("Expected list Limit of 0 but got %d", options.Limit)
+			}
+			pods := make([]v1.Pod, 10)
+			for i := 0; i < 10; i++ {
+				pods[i] = v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%d", i), ResourceVersion: fmt.Sprintf("%d", i)}}
+			}
+			return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "10"}, Items: pods}, nil
+		},
+	}
+	r := NewReflector(lw, &v1.Pod{}, s, 0)
+	r.setLastSyncResourceVersion("10")
+	r.ListAndWatch(stopCh)
+
+	results := s.List()
+	if len(results) != 10 {
+		t.Errorf("Expected 10 results, got %d", len(results))
+	}
+}
+
+func TestReflectorPaginatingNonConsistentReadsIfWatchCacheDisabled(t *testing.T) {
+	var stopCh chan struct{}
+	s := NewStore(MetaNamespaceKeyFunc)
+
+	lw := &testLW{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			// Stop once the reflector begins watching since we're only interested in the list.
+			close(stopCh)
+			fw := watch.NewFake()
+			return fw, nil
+		},
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			// Check that default pager limit is set.
+			if options.Limit != 500 {
+				t.Fatalf("Expected list Limit of 500 but got %d", options.Limit)
+			}
+			pods := make([]v1.Pod, 10)
+			for i := 0; i < 10; i++ {
+				pods[i] = v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%d", i), ResourceVersion: fmt.Sprintf("%d", i)}}
+			}
+			switch options.Continue {
+			case "":
+				return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "10", Continue: "C1"}, Items: pods[0:4]}, nil
+			case "C1":
+				return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "10", Continue: "C2"}, Items: pods[4:8]}, nil
+			case "C2":
+				return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "10"}, Items: pods[8:10]}, nil
+			default:
+				t.Fatalf("Unrecognized continue: %s", options.Continue)
+			}
+			return nil, nil
+		},
+	}
+	r := NewReflector(lw, &v1.Pod{}, s, 0)
+
+	// Initial list should initialize paginatedResult in the reflector.
+	stopCh = make(chan struct{})
+	r.ListAndWatch(stopCh)
+	if results := s.List(); len(results) != 10 {
+		t.Errorf("Expected 10 results, got %d", len(results))
+	}
+
+	// Since initial list for ResourceVersion="0" was paginated, the subsequent
+	// ones should also be paginated.
+	stopCh = make(chan struct{})
+	r.ListAndWatch(stopCh)
+	if results := s.List(); len(results) != 10 {
 		t.Errorf("Expected 10 results, got %d", len(results))
 	}
 }
@@ -593,7 +883,6 @@ func TestReflectorFullListIfExpired(t *testing.T) {
 				t.Error(err)
 				return nil, err
 			}
-			return nil, nil
 		},
 	}
 	r := NewReflector(lw, &v1.Pod{}, s, 0)
@@ -626,7 +915,78 @@ func TestReflectorFullListIfExpired(t *testing.T) {
 	}
 }
 
-func TestReflectorSetExpectedType(t *testing.T) {
+func TestReflectorFullListIfTooLarge(t *testing.T) {
+	stopCh := make(chan struct{})
+	s := NewStore(MetaNamespaceKeyFunc)
+	listCallRVs := []string{}
+	version := 30
+
+	lw := &testLW{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			// Stop once the reflector begins watching since we're only interested in the list.
+			close(stopCh)
+			fw := watch.NewFake()
+			return fw, nil
+		},
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			listCallRVs = append(listCallRVs, options.ResourceVersion)
+			resourceVersion := strconv.Itoa(version)
+
+			switch options.ResourceVersion {
+			// initial list
+			case "0":
+				return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "20"}}, nil
+			// relist after the initial list
+			case "20":
+				err := apierrors.NewTimeoutError("too large resource version", 1)
+				err.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: metav1.CauseTypeResourceVersionTooLarge}}
+				return nil, err
+			// relist after the initial list (covers the error format used in api server 1.17.0-1.18.5)
+			case "30":
+				err := apierrors.NewTimeoutError("too large resource version", 1)
+				err.ErrStatus.Details.Causes = []metav1.StatusCause{{Message: "Too large resource version"}}
+				return nil, err
+			// relist after the initial list (covers the error format used in api server before 1.17.0)
+			case "40":
+				err := apierrors.NewTimeoutError("Too large resource version", 1)
+				return nil, err
+			// relist from etcd after "too large" error
+			case "":
+				version += 10
+				return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: resourceVersion}}, nil
+			default:
+				return nil, fmt.Errorf("unexpected List call: %s", options.ResourceVersion)
+			}
+		},
+	}
+	r := NewReflector(lw, &v1.Pod{}, s, 0)
+
+	// Initial list should use RV=0
+	if err := r.ListAndWatch(stopCh); err != nil {
+		t.Fatal(err)
+	}
+
+	// Relist from the future version.
+	// This may happen, as watchcache is initialized from "current global etcd resource version"
+	// when kube-apiserver is starting and if no objects are changing after that each kube-apiserver
+	// may be synced to a different version and they will never converge.
+	// TODO: We should use etcd progress-notify feature to avoid this behavior but until this is
+	// done we simply try to relist from now to avoid continuous errors on relists.
+	for i := 1; i <= 3; i++ {
+		// relist twice to cover the two variants of TooLargeResourceVersion api errors
+		stopCh = make(chan struct{})
+		if err := r.ListAndWatch(stopCh); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expectedRVs := []string{"0", "20", "", "30", "", "40", ""}
+	if !reflect.DeepEqual(listCallRVs, expectedRVs) {
+		t.Errorf("Expected series of list calls with resource version of %#v but got: %#v", expectedRVs, listCallRVs)
+	}
+}
+
+func TestGetTypeDescriptionFromObject(t *testing.T) {
 	obj := &unstructured.Unstructured{}
 	gvk := schema.GroupVersionKind{
 		Group:   "mygroup",
@@ -634,49 +994,128 @@ func TestReflectorSetExpectedType(t *testing.T) {
 		Kind:    "MyKind",
 	}
 	obj.SetGroupVersionKind(gvk)
+
 	testCases := map[string]struct {
-		inputType        interface{}
-		expectedTypeName string
-		expectedType     reflect.Type
-		expectedGVK      *schema.GroupVersionKind
+		inputType               interface{}
+		expectedTypeDescription string
 	}{
 		"Nil type": {
-			expectedTypeName: defaultExpectedTypeName,
+			expectedTypeDescription: defaultExpectedTypeName,
 		},
 		"Normal type": {
-			inputType:        &v1.Pod{},
-			expectedTypeName: "*v1.Pod",
-			expectedType:     reflect.TypeOf(&v1.Pod{}),
+			inputType:               &v1.Pod{},
+			expectedTypeDescription: "*v1.Pod",
 		},
 		"Unstructured type without GVK": {
-			inputType:        &unstructured.Unstructured{},
-			expectedTypeName: "*unstructured.Unstructured",
-			expectedType:     reflect.TypeOf(&unstructured.Unstructured{}),
+			inputType:               &unstructured.Unstructured{},
+			expectedTypeDescription: "*unstructured.Unstructured",
 		},
 		"Unstructured type with GVK": {
-			inputType:        obj,
-			expectedTypeName: gvk.String(),
-			expectedType:     reflect.TypeOf(&unstructured.Unstructured{}),
-			expectedGVK:      &gvk,
+			inputType:               obj,
+			expectedTypeDescription: gvk.String(),
 		},
 	}
 	for testName, tc := range testCases {
 		t.Run(testName, func(t *testing.T) {
-			r := &Reflector{}
-			r.setExpectedType(tc.inputType)
-			if tc.expectedType != r.expectedType {
-				t.Fatalf("Expected expectedType %v, got %v", tc.expectedType, r.expectedType)
-			}
-			if tc.expectedTypeName != r.expectedTypeName {
-				t.Fatalf("Expected expectedTypeName %v, got %v", tc.expectedTypeName, r.expectedTypeName)
-			}
-			gvkNotEqual := (tc.expectedGVK == nil) != (r.expectedGVK == nil)
-			if tc.expectedGVK != nil && r.expectedGVK != nil {
-				gvkNotEqual = *tc.expectedGVK != *r.expectedGVK
-			}
-			if gvkNotEqual {
-				t.Fatalf("Expected expectedGVK %v, got %v", tc.expectedGVK, r.expectedGVK)
+			typeDescription := getTypeDescriptionFromObject(tc.inputType)
+			if tc.expectedTypeDescription != typeDescription {
+				t.Fatalf("Expected typeDescription %v, got %v", tc.expectedTypeDescription, typeDescription)
 			}
 		})
+	}
+}
+
+func TestGetExpectedGVKFromObject(t *testing.T) {
+	obj := &unstructured.Unstructured{}
+	gvk := schema.GroupVersionKind{
+		Group:   "mygroup",
+		Version: "v1",
+		Kind:    "MyKind",
+	}
+	obj.SetGroupVersionKind(gvk)
+
+	testCases := map[string]struct {
+		inputType   interface{}
+		expectedGVK *schema.GroupVersionKind
+	}{
+		"Nil type": {},
+		"Some non Unstructured type": {
+			inputType: &v1.Pod{},
+		},
+		"Unstructured type without GVK": {
+			inputType: &unstructured.Unstructured{},
+		},
+		"Unstructured type with GVK": {
+			inputType:   obj,
+			expectedGVK: &gvk,
+		},
+	}
+	for testName, tc := range testCases {
+		t.Run(testName, func(t *testing.T) {
+			expectedGVK := getExpectedGVKFromObject(tc.inputType)
+			gvkNotEqual := (tc.expectedGVK == nil) != (expectedGVK == nil)
+			if tc.expectedGVK != nil && expectedGVK != nil {
+				gvkNotEqual = *tc.expectedGVK != *expectedGVK
+			}
+			if gvkNotEqual {
+				t.Fatalf("Expected expectedGVK %v, got %v", tc.expectedGVK, expectedGVK)
+			}
+		})
+	}
+}
+
+type storeWithRV struct {
+	Store
+
+	// resourceVersions tracks values passed by UpdateResourceVersion
+	resourceVersions []string
+}
+
+func (s *storeWithRV) UpdateResourceVersion(resourceVersion string) {
+	s.resourceVersions = append(s.resourceVersions, resourceVersion)
+}
+
+func newStoreWithRV() *storeWithRV {
+	return &storeWithRV{
+		Store: NewStore(MetaNamespaceKeyFunc),
+	}
+}
+
+func TestReflectorResourceVersionUpdate(t *testing.T) {
+	s := newStoreWithRV()
+
+	stopCh := make(chan struct{})
+	fw := watch.NewFake()
+
+	lw := &testLW{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return fw, nil
+		},
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return &v1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "10"}}, nil
+		},
+	}
+	r := NewReflector(lw, &v1.Pod{}, s, 0)
+
+	makePod := func(rv string) *v1.Pod {
+		return &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: rv}}
+	}
+
+	go func() {
+		fw.Action(watch.Added, makePod("10"))
+		fw.Action(watch.Modified, makePod("20"))
+		fw.Action(watch.Bookmark, makePod("30"))
+		fw.Action(watch.Deleted, makePod("40"))
+		close(stopCh)
+	}()
+
+	// Initial list should use RV=0
+	if err := r.ListAndWatch(stopCh); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedRVs := []string{"10", "20", "30", "40"}
+	if !reflect.DeepEqual(s.resourceVersions, expectedRVs) {
+		t.Errorf("Expected series of resource version updates of %#v but got: %#v", expectedRVs, s.resourceVersions)
 	}
 }
