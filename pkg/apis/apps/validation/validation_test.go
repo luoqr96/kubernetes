@@ -42,14 +42,14 @@ func intStrAddr(intOrStr intstr.IntOrString) *intstr.IntOrString {
 	return &intOrStr
 }
 
-type setTweak func(s apps.StatefulSet)
+type statefulSetTweak func(ss apps.StatefulSet)
 
-func makeSet(selectorLabels *map[string]string, template *api.PodTemplate, tweaks ...setTweak) apps.StatefulSet {
+func mkStatefulSet(template *api.PodTemplate, tweaks ...statefulSetTweak) apps.StatefulSet {
 	s := apps.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 		Spec: apps.StatefulSetSpec{
 			PodManagementPolicy: apps.OrderedReadyPodManagement,
-			Selector:            &metav1.LabelSelector{MatchLabels: *selectorLabels},
+			Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"a": "b"}},
 			Template:            template.Template,
 			UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 		},
@@ -62,53 +62,104 @@ func makeSet(selectorLabels *map[string]string, template *api.PodTemplate, tweak
 	return s
 }
 
-func tweakName(name string) setTweak {
-	return func(s apps.StatefulSet) {
-		s.ObjectMeta.Name = name
+func tweakName(name string) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.ObjectMeta.Name = name
 	}
 }
 
-func tweakNamespace(ns string) setTweak {
-	return func(s apps.StatefulSet) {
-		s.ObjectMeta.Namespace = ns
+func tweakNamespace(ns string) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.ObjectMeta.Namespace = ns
 	}
 }
 
-func tweakManagementPolicy(policy apps.PodManagementPolicyType) setTweak {
-	return func(s apps.StatefulSet) {
-		s.Spec.PodManagementPolicy = policy
+func tweakMetaLabels(labels map[string]string) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.ObjectMeta.Labels = labels
 	}
 }
 
-func tweakRepicas(replicas int32) setTweak {
-	return func(s apps.StatefulSet) {
-		s.Spec.Replicas = replicas
+func tweakAnnotations(annotations map[string]string) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.ObjectMeta.Annotations = annotations
 	}
 }
 
-func tweakPodManagementPolicy(policy apps.PodManagementPolicyType) setTweak {
-	return func(s apps.StatefulSet) {
-		s.Spec.PodManagementPolicy = policy
+func tweakFinalizers(finalizers []string) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.ObjectMeta.Finalizers = finalizers
 	}
 }
 
-func tweakUpdateStrategy(strategy apps.StatefulSetUpdateStrategy) setTweak {
-	return func(s apps.StatefulSet) {
-		s.Spec.UpdateStrategy = strategy
+func tweakManagementPolicy(policy apps.PodManagementPolicyType) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.PodManagementPolicy = policy
 	}
 }
 
-func tweakMinReadySeconds(t int32) setTweak {
-	return func(s apps.StatefulSet) {
-		s.Spec.MinReadySeconds = t
+func tweakReplicas(replicas int32) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.Replicas = replicas
+	}
+}
+
+func tweakPodManagementPolicy(policy apps.PodManagementPolicyType) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.PodManagementPolicy = policy
+	}
+}
+
+func tweakSelectorLabels(labels map[string]string) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+	}
+}
+
+func tweakRestartPolicy(rp api.RestartPolicy) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.Template.Spec.RestartPolicy = rp
+	}
+}
+
+func tweakMinReadySeconds(t int32) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.MinReadySeconds = t
+	}
+}
+
+func tweakOrdinalsStart(s int32) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.Ordinals = &apps.StatefulSetOrdinals{Start: s}
+	}
+}
+
+func tweakPVCPolicy(policy apps.StatefulSetPersistentVolumeClaimRetentionPolicy) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.PersistentVolumeClaimRetentionPolicy = &policy
+	}
+}
+
+func tweakUpdateStrategy(strategy apps.StatefulSetUpdateStrategy) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.UpdateStrategy = strategy
+	}
+}
+
+func tweakPVCTemplateSize(pvc []api.PersistentVolumeClaim) statefulSetTweak {
+	return func(ss apps.StatefulSet) {
+		ss.Spec.VolumeClaimTemplates = pvc
 	}
 }
 
 type updateStrategyTweak func(s apps.StatefulSetUpdateStrategy)
 
-func makeUpdateStrategy(tweaks ...updateStrategyTweak) apps.StatefulSetUpdateStrategy {
+func mkUpdateStrategy(tweaks ...updateStrategyTweak) apps.StatefulSetUpdateStrategy {
 	s := apps.StatefulSetUpdateStrategy{
 		Type: apps.RollingUpdateStatefulSetStrategyType,
+		RollingUpdate: func() *apps.RollingUpdateStatefulSetStrategy {
+			return &apps.RollingUpdateStatefulSetStrategy{}
+		}(),
 	}
 
 	for _, tw := range tweaks {
@@ -126,9 +177,13 @@ func tweakUpdateStrategyType(t apps.StatefulSetUpdateStrategyType) updateStrateg
 
 func tweakRollingUpdatePartition(partition int32) updateStrategyTweak {
 	return func(s apps.StatefulSetUpdateStrategy) {
-		s.RollingUpdate = func() *apps.RollingUpdateStatefulSetStrategy {
-			return &apps.RollingUpdateStatefulSetStrategy{Partition: partition}
-		}()
+		s.RollingUpdate.Partition = partition
+	}
+}
+
+func tweakMaxUnavailable(mu intstr.IntOrString) updateStrategyTweak {
+	return func(s apps.StatefulSetUpdateStrategy) {
+		s.RollingUpdate.MaxUnavailable = intStrAddr(mu)
 	}
 }
 
@@ -185,114 +240,88 @@ func TestValidateStatefulSet(t *testing.T) {
 	successCases := []testCase{
 		{
 			name: "alpha name",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakName("abc")),
+			set:  mkStatefulSet(&validPodTemplate, tweakName("abc")),
 		},
 		{
 			name: "alphanumeric name",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakName("abc-123")),
+			set:  mkStatefulSet(&validPodTemplate, tweakName("abc-123")),
 		},
 		{
 			name: "parallel pod management",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakManagementPolicy(apps.ParallelPodManagement)),
+			set:  mkStatefulSet(&validPodTemplate, tweakManagementPolicy(apps.ParallelPodManagement)),
 		},
 		{
 			name: "ordered ready pod management",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakManagementPolicy(apps.OrderedReadyPodManagement)),
+			set:  mkStatefulSet(&validPodTemplate, tweakManagementPolicy(apps.OrderedReadyPodManagement)),
 		},
 		{
 			name: "update strategy",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakRepicas(3), tweakUpdateStrategy(makeUpdateStrategy(tweakRollingUpdatePartition(2)))),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakRollingUpdatePartition(2))),
+			),
 		},
 		{
 			name: "PVC policy " + enableStatefulSetAutoDeletePVC,
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					PersistentVolumeClaimRetentionPolicy: &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
-						WhenDeleted: apps.DeletePersistentVolumeClaimRetentionPolicyType,
-						WhenScaled:  apps.RetainPersistentVolumeClaimRetentionPolicyType,
-					},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakPVCPolicy(apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: apps.DeletePersistentVolumeClaimRetentionPolicyType,
+					WhenScaled:  apps.RetainPersistentVolumeClaimRetentionPolicyType,
+				}),
+			),
 		},
 		{
 			name: "maxUnavailable with parallel pod management",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.ParallelPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					Replicas:            3,
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{
-						Type: apps.RollingUpdateStatefulSetStrategyType,
-						RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
-							Partition:      2,
-							MaxUnavailable: intStrAddr(intstr.FromInt(2)),
-						},
-					},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakRollingUpdatePartition(2),
+					tweakMaxUnavailable(intstr.FromInt(2)),
+				)),
+			),
 		},
 		{
 			name: "ordinals.start positive value",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.ParallelPodManagement,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					Replicas:            3,
-					Ordinals:            &apps.StatefulSetOrdinals{Start: 2},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakOrdinalsStart(2),
+			),
 		},
 	}
 
 	errorCases := []testCase{
 		{
 			name: "zero-length name",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakName("")),
+			set:  mkStatefulSet(&validPodTemplate, tweakName("")),
 			errs: field.ErrorList{
 				field.Required(field.NewPath("metadata", "name"), ""),
 			},
 		},
 		{
 			name: "name-with-dots",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakName("abc.123")),
+			set:  mkStatefulSet(&validPodTemplate, tweakName("abc.123")),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), "abc.123", ""),
 			},
 		},
 		{
 			name: "long name",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakName(strings.Repeat("a", 64))),
+			set:  mkStatefulSet(&validPodTemplate, tweakName(strings.Repeat("a", 64))),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), strings.Repeat("a", 64), ""),
 			},
 		},
 		{
 			name: "missing-namespace",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakNamespace("")),
+			set:  mkStatefulSet(&validPodTemplate, tweakNamespace("")),
 			errs: field.ErrorList{
 				field.Required(field.NewPath("metadata", "namespace"), ""),
 			},
 		},
 		{
 			name: "empty selector",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set:  mkStatefulSet(&validPodTemplate, tweakSelectorLabels(map[string]string{})),
 			errs: field.ErrorList{
 				field.Required(field.NewPath("spec", "selector"), ""),
 				field.Invalid(field.NewPath("spec", "template", "metadata", "labels"), nil, ""), // selector is empty, labels are not, so select doesn't match labels
@@ -300,64 +329,33 @@ func TestValidateStatefulSet(t *testing.T) {
 		},
 		{
 			name: "selector_doesnt_match",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set:  mkStatefulSet(&validPodTemplate, tweakSelectorLabels(map[string]string{"foo": "bar"})),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "template", "metadata", "labels"), nil, ""),
 			},
 		},
 		{
 			name: "negative_replicas",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakRepicas(-1)),
+			set:  mkStatefulSet(&validPodTemplate, tweakReplicas(-1)),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "replicas"), nil, ""),
 			},
 		},
 		{
 			name: "invalid_label",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "abc-123",
-					Namespace: metav1.NamespaceDefault,
-					Labels: map[string]string{
-						"NoUppercaseOrSpecialCharsLike=Equals": "bar",
-					},
-				},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate, tweakMetaLabels(map[string]string{
+				"NoUppercaseOrSpecialCharsLike=Equals": "bar",
+			})),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "labels"), nil, ""),
 			},
 		},
 		{
 			name: "invalid_label 2",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "abc-123",
-					Namespace: metav1.NamespaceDefault,
-					Labels: map[string]string{
-						"NoUppercaseOrSpecialCharsLike=Equals": "bar",
-					},
-				},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: invalidLabels},
-					Template:            invalidPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set: mkStatefulSet(&invalidPodTemplate,
+				tweakMetaLabels(map[string]string{"NoUppercaseOrSpecialCharsLike=Equals": "bar"}),
+				tweakSelectorLabels(invalidLabels),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "labels"), nil, ""),
 				field.Invalid(field.NewPath("spec", "selector"), nil, ""),
@@ -366,166 +364,109 @@ func TestValidateStatefulSet(t *testing.T) {
 		},
 		{
 			name: "invalid_annotation",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "abc-123",
-					Namespace: metav1.NamespaceDefault,
-					Annotations: map[string]string{
-						"NoUppercaseOrSpecialCharsLike=Equals": "bar",
-					},
-				},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakAnnotations(map[string]string{"NoUppercaseOrSpecialCharsLike=Equals": "bar"}),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "annotations"), nil, ""),
 			},
 		},
 		{
 			name: "invalid restart policy 1",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "abc-123",
-					Namespace: metav1.NamespaceDefault,
-				},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template: api.PodTemplateSpec{
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyOnFailure,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
-						},
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: validLabels,
-						},
-					},
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set:  mkStatefulSet(&validPodTemplate, tweakRestartPolicy(api.RestartPolicyOnFailure)),
 			errs: field.ErrorList{
 				field.NotSupported(field.NewPath("spec", "template", "spec", "restartPolicy"), nil, nil),
 			},
 		},
 		{
 			name: "invalid restart policy 2",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "abc-123",
-					Namespace: metav1.NamespaceDefault,
-				},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template: api.PodTemplateSpec{
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyNever,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
-						},
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: validLabels,
-						},
-					},
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set:  mkStatefulSet(&validPodTemplate, tweakRestartPolicy(api.RestartPolicyNever)),
 			errs: field.ErrorList{
 				field.NotSupported(field.NewPath("spec", "template", "spec", "restartPolicy"), nil, nil),
 			},
 		},
 		{
 			name: "empty restart policy",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "abc-123",
-					Namespace: metav1.NamespaceDefault,
-				},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template: api.PodTemplateSpec{
-						Spec: api.PodSpec{
-							DNSPolicy:  api.DNSClusterFirst,
-							Containers: []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
-						},
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: validLabels,
-						},
-					},
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set:  mkStatefulSet(&validPodTemplate, tweakRestartPolicy("")),
 			errs: field.ErrorList{
 				field.NotSupported(field.NewPath("spec", "template", "spec", "restartPolicy"), nil, nil),
 			},
 		},
 		{
 			name: "invalid update strategy",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakRepicas(3), tweakUpdateStrategy(makeUpdateStrategy(tweakUpdateStrategyType("foo")))),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(tweakUpdateStrategyType("foo"))),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "updateStrategy"), nil, ""),
 			},
 		},
 		{
 			name: "empty update strategy",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakRepicas(3), tweakUpdateStrategy(makeUpdateStrategy(tweakUpdateStrategyType("")))),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(tweakUpdateStrategyType(""))),
+			),
 			errs: field.ErrorList{
 				field.Required(field.NewPath("spec", "updateStrategy"), ""),
 			},
 		},
 		{
 			name: "invalid rolling update",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakRepicas(3), tweakUpdateStrategy(makeUpdateStrategy(tweakUpdateStrategyType(apps.OnDeleteStatefulSetStrategyType), tweakRollingUpdatePartition(1)))),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakUpdateStrategyType(apps.OnDeleteStatefulSetStrategyType),
+					tweakRollingUpdatePartition(1))),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "updateStrategy", "rollingUpdate"), nil, ""),
 			},
 		},
 		{
 			name: "negative parition",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakRepicas(3), tweakUpdateStrategy(makeUpdateStrategy(tweakRollingUpdatePartition(-1)))),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakRollingUpdatePartition(-1))),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "updateStrategy", "rollingUpdate", "partition"), nil, ""),
 			},
 		},
 		{
 			name: "empty pod management policy",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakPodManagementPolicy(""), tweakRepicas(3)),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakPodManagementPolicy(""),
+				tweakReplicas(3),
+			),
 			errs: field.ErrorList{
 				field.Required(field.NewPath("spec", "podManagementPolicy"), ""),
 			},
 		},
 		{
 			name: "invalid pod management policy",
-			set:  makeSet(&validLabels, &validPodTemplate, tweakPodManagementPolicy("foo"), tweakRepicas(3)),
+			set: mkStatefulSet(&validPodTemplate,
+				tweakPodManagementPolicy("foo"),
+				tweakReplicas(3),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "podManagementPolicy"), nil, ""),
 			},
 		},
 		{
 			name: "set active deadline seconds",
-			set:  makeSet(&validLabels, &invalidPodTemplate2, tweakRepicas(3)),
+			set:  mkStatefulSet(&invalidPodTemplate2, tweakReplicas(3)),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec", "template", "spec", "activeDeadlineSeconds"), ""),
 			},
 		},
 		{
 			name: "empty PersistentVolumeClaimRetentionPolicy " + enableStatefulSetAutoDeletePVC,
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PersistentVolumeClaimRetentionPolicy: &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{},
-					PodManagementPolicy:                  apps.OrderedReadyPodManagement,
-					Selector:                             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:                             validPodTemplate.Template,
-					UpdateStrategy:                       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakPVCPolicy(apps.StatefulSetPersistentVolumeClaimRetentionPolicy{}),
+			),
 			errs: field.ErrorList{
 				field.NotSupported(field.NewPath("spec", "persistentVolumeClaimRetentionPolicy", "whenDeleted"), nil, nil),
 				field.NotSupported(field.NewPath("spec", "persistentVolumeClaimRetentionPolicy", "whenScaled"), nil, nil),
@@ -533,19 +474,12 @@ func TestValidateStatefulSet(t *testing.T) {
 		},
 		{
 			name: "invalid PersistentVolumeClaimRetentionPolicy " + enableStatefulSetAutoDeletePVC,
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PersistentVolumeClaimRetentionPolicy: &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
-						WhenScaled:  apps.PersistentVolumeClaimRetentionPolicyType("invalid-retention-policy"),
-						WhenDeleted: apps.PersistentVolumeClaimRetentionPolicyType("invalid-retention-policy"),
-					},
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakPVCPolicy(apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
+					WhenScaled:  apps.PersistentVolumeClaimRetentionPolicyType("invalid-retention-policy"),
+					WhenDeleted: apps.PersistentVolumeClaimRetentionPolicyType("invalid-retention-policy"),
+				}),
+			),
 			errs: field.ErrorList{
 				field.NotSupported(field.NewPath("spec", "persistentVolumeClaimRetentionPolicy", "whenDeleted"), nil, nil),
 				field.NotSupported(field.NewPath("spec", "persistentVolumeClaimRetentionPolicy", "whenScaled"), nil, nil),
@@ -553,80 +487,46 @@ func TestValidateStatefulSet(t *testing.T) {
 		},
 		{
 			name: "zero maxUnavailable",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					Replicas:            3,
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{
-						Type: apps.RollingUpdateStatefulSetStrategyType,
-						RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
-							MaxUnavailable: intStrAddr(intstr.FromInt(0)),
-						},
-					},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakMaxUnavailable(intstr.FromInt(0)),
+				)),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "updateStrategy", "rollingUpdate", "maxUnavailable"), nil, ""),
 			},
 		},
 		{
 			name: "zero percent maxUnavailable",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.ParallelPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					Replicas:            3,
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{
-						Type: apps.RollingUpdateStatefulSetStrategyType,
-						RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
-							MaxUnavailable: intStrAddr(intstr.FromString("0%")),
-						},
-					},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakMaxUnavailable(intstr.FromString("0%")),
+				)),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "updateStrategy", "rollingUpdate", "maxUnavailable"), nil, ""),
 			},
 		},
 		{
 			name: "greater than 100 percent maxUnavailable",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.ParallelPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					Replicas:            3,
-					UpdateStrategy: apps.StatefulSetUpdateStrategy{
-						Type: apps.RollingUpdateStatefulSetStrategyType,
-						RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
-							MaxUnavailable: intStrAddr(intstr.FromString("101%")),
-						},
-					},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakMaxUnavailable(intstr.FromString("101%")),
+				)),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "updateStrategy", "rollingUpdate", "maxUnavailable"), nil, ""),
 			},
 		},
 		{
 			name: "invalid ordinals.start ",
-			set: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc-123", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.ParallelPodManagement,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					Replicas:            3,
-					Ordinals:            &apps.StatefulSetOrdinals{Start: -2},
-				},
-			},
+			set: mkStatefulSet(&validPodTemplate,
+				tweakReplicas(3),
+				tweakOrdinalsStart(-2),
+			),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "ordinals.start"), nil, ""),
 			},
@@ -943,237 +843,137 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 	successCases := []testCase{
 		{
 			name:   "update replica count",
-			old:    makeSet(&validLabels, &validPodTemplate),
-			update: makeSet(&validLabels, &validPodTemplate, tweakRepicas(3)),
+			old:    mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(&validPodTemplate, tweakReplicas(3)),
 		},
 		{
 			name:   "update containers 1",
-			old:    makeSet(&validLabels, &validPodTemplate),
-			update: makeSet(&validLabels, addContainersValidTemplate),
+			old:    mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(addContainersValidTemplate),
 		},
 		{
 			name:   "update containers 2",
-			old:    makeSet(&validLabels, addContainersValidTemplate),
-			update: makeSet(&validLabels, &validPodTemplate),
+			old:    mkStatefulSet(addContainersValidTemplate),
+			update: mkStatefulSet(&validPodTemplate),
 		},
 		{
 			name: "update containers and pvc retention policy 1",
-			old:  makeSet(&validLabels, addContainersValidTemplate),
-			update: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					PersistentVolumeClaimRetentionPolicy: &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
-						WhenDeleted: apps.RetainPersistentVolumeClaimRetentionPolicyType,
-						WhenScaled:  apps.RetainPersistentVolumeClaimRetentionPolicyType,
-					},
-				},
-			},
+			old:  mkStatefulSet(addContainersValidTemplate),
+			update: mkStatefulSet(&validPodTemplate,
+				tweakPVCPolicy(apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: apps.RetainPersistentVolumeClaimRetentionPolicyType,
+					WhenScaled:  apps.RetainPersistentVolumeClaimRetentionPolicyType,
+				}),
+			),
 		},
 		{
 			name: "update containers and pvc retention policy 2",
-			old: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            addContainersValidTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					PersistentVolumeClaimRetentionPolicy: &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
-						WhenScaled: apps.RetainPersistentVolumeClaimRetentionPolicyType,
-					},
-				},
-			},
-			update: makeSet(&validLabels, &validPodTemplate),
+			old: mkStatefulSet(addContainersValidTemplate,
+				tweakPVCPolicy(apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
+					WhenScaled: apps.RetainPersistentVolumeClaimRetentionPolicyType,
+				}),
+			),
+			update: mkStatefulSet(&validPodTemplate),
 		},
 		{
-			name:   "update update strategy",
-			old:    makeSet(&validLabels, &validPodTemplate),
-			update: makeSet(&validLabels, &validPodTemplate, tweakUpdateStrategy(makeUpdateStrategy(tweakUpdateStrategyType(apps.OnDeleteStatefulSetStrategyType)))),
+			name: "update update strategy",
+			old:  mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(&validPodTemplate,
+				tweakUpdateStrategy(mkUpdateStrategy(
+					tweakUpdateStrategyType(apps.OnDeleteStatefulSetStrategyType))),
+			),
 		},
 		{
 			name:   "update min ready seconds 1",
-			old:    makeSet(&validLabels, &validPodTemplate),
-			update: makeSet(&validLabels, &validPodTemplate, tweakMinReadySeconds(10)),
+			old:    mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(&validPodTemplate, tweakMinReadySeconds(10)),
 		},
 		{
 			name:   "update min ready seconds 2",
-			old:    makeSet(&validLabels, &validPodTemplate, tweakMinReadySeconds(5)),
-			update: makeSet(&validLabels, &validPodTemplate, tweakMinReadySeconds(10)),
+			old:    mkStatefulSet(&validPodTemplate, tweakMinReadySeconds(5)),
+			update: mkStatefulSet(&validPodTemplate, tweakMinReadySeconds(10)),
 		},
 		{
-			name: "update existing instance with now-invalid name",
-			old: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc.123.example", Namespace: metav1.NamespaceDefault, Finalizers: []string{"final"}},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
-			update: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc.123.example", Namespace: metav1.NamespaceDefault, Finalizers: []string{}},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
+			name:   "update existing instance with now-invalid name",
+			old:    mkStatefulSet(&validPodTemplate, tweakFinalizers([]string{"final"})),
+			update: mkStatefulSet(&validPodTemplate, tweakFinalizers([]string{})),
 		},
 		{
-			name: "update existing instance with .spec.ordinals.start",
-			old: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc.123.example", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-				},
-			},
-			update: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc.123.example", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy: apps.OrderedReadyPodManagement,
-					Selector:            &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:            validPodTemplate.Template,
-					UpdateStrategy:      apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					Ordinals: &apps.StatefulSetOrdinals{
-						Start: 3,
-					},
-				},
-			},
+			name:   "update existing instance with .spec.ordinals.start",
+			old:    mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(&validPodTemplate, tweakOrdinalsStart(3)),
 		},
 	}
 
 	errorCases := []testCase{
 		{
 			name:   "update name",
-			old:    makeSet(&validLabels, &validPodTemplate, tweakName("abc")),
-			update: makeSet(&validLabels, &validPodTemplate, tweakName("abc2")),
+			old:    mkStatefulSet(&validPodTemplate, tweakName("abc")),
+			update: mkStatefulSet(&validPodTemplate, tweakName("abc2")),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), nil, ""),
 			},
 		},
 		{
 			name:   "update namespace",
-			old:    makeSet(&validLabels, &validPodTemplate, tweakNamespace(metav1.NamespaceDefault)),
-			update: makeSet(&validLabels, &validPodTemplate, tweakNamespace(metav1.NamespaceDefault+"1")),
+			old:    mkStatefulSet(&validPodTemplate, tweakNamespace(metav1.NamespaceDefault)),
+			update: mkStatefulSet(&validPodTemplate, tweakNamespace(metav1.NamespaceDefault+"1")),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "namespace"), nil, ""),
 			},
 		},
 		{
 			name:   "update selector",
-			old:    makeSet(&validLabels, &validPodTemplate),
-			update: makeSet(&validLabels2, &validPodTemplate2),
+			old:    mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(&validPodTemplate2),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec"), ""),
 			},
 		},
 		{
 			name:   "update pod management policy 1",
-			old:    makeSet(&validLabels, &validPodTemplate, tweakManagementPolicy("")),
-			update: makeSet(&validLabels, &validPodTemplate, tweakManagementPolicy(apps.OrderedReadyPodManagement)),
+			old:    mkStatefulSet(&validPodTemplate, tweakManagementPolicy("")),
+			update: mkStatefulSet(&validPodTemplate, tweakManagementPolicy(apps.OrderedReadyPodManagement)),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec"), ""),
 			},
 		},
 		{
 			name:   "update pod management policy 2",
-			old:    makeSet(&validLabels, &validPodTemplate, tweakManagementPolicy(apps.ParallelPodManagement)),
-			update: makeSet(&validLabels, &validPodTemplate, tweakManagementPolicy(apps.OrderedReadyPodManagement)),
+			old:    mkStatefulSet(&validPodTemplate, tweakManagementPolicy(apps.ParallelPodManagement)),
+			update: mkStatefulSet(&validPodTemplate, tweakManagementPolicy(apps.OrderedReadyPodManagement)),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec"), ""),
 			},
 		},
 		{
 			name:   "update to negative replicas",
-			old:    makeSet(&validLabels, &validPodTemplate),
-			update: makeSet(&validLabels, &validPodTemplate, tweakRepicas(-1)),
+			old:    mkStatefulSet(&validPodTemplate),
+			update: mkStatefulSet(&validPodTemplate, tweakReplicas(-1)),
 			errs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "replicas"), nil, ""),
 			},
 		},
 		{
-			name: "update pvc template size",
-			old: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy:  apps.OrderedReadyPodManagement,
-					Selector:             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:             validPodTemplate.Template,
-					UpdateStrategy:       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					VolumeClaimTemplates: []api.PersistentVolumeClaim{validPVCTemplate},
-				},
-			},
-			update: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy:  apps.OrderedReadyPodManagement,
-					Selector:             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:             validPodTemplate.Template,
-					UpdateStrategy:       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					VolumeClaimTemplates: []api.PersistentVolumeClaim{validPVCTemplateChangedSize},
-				},
-			},
+			name:   "update pvc template size",
+			old:    mkStatefulSet(&validPodTemplate, tweakPVCTemplateSize([]api.PersistentVolumeClaim{validPVCTemplate})),
+			update: mkStatefulSet(&validPodTemplate, tweakPVCTemplateSize([]api.PersistentVolumeClaim{validPVCTemplateChangedSize})),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec"), ""),
 			},
 		},
 		{
-			name: "update pvc template storage class",
-			old: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy:  apps.OrderedReadyPodManagement,
-					Selector:             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:             validPodTemplate.Template,
-					UpdateStrategy:       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					VolumeClaimTemplates: []api.PersistentVolumeClaim{validPVCTemplate},
-				},
-			},
-			update: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy:  apps.OrderedReadyPodManagement,
-					Selector:             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:             validPodTemplate.Template,
-					UpdateStrategy:       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					VolumeClaimTemplates: []api.PersistentVolumeClaim{validPVCTemplateChangedClass},
-				},
-			},
+			name:   "update pvc template storage class",
+			old:    mkStatefulSet(&validPodTemplate, tweakPVCTemplateSize([]api.PersistentVolumeClaim{validPVCTemplate})),
+			update: mkStatefulSet(&validPodTemplate, tweakPVCTemplateSize([]api.PersistentVolumeClaim{validPVCTemplateChangedClass})),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec"), ""),
 			},
 		},
 		{
-			name: "add new pvc template",
-			old: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy:  apps.OrderedReadyPodManagement,
-					Selector:             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:             validPodTemplate.Template,
-					UpdateStrategy:       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					VolumeClaimTemplates: []api.PersistentVolumeClaim{validPVCTemplate},
-				},
-			},
-			update: apps.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-				Spec: apps.StatefulSetSpec{
-					PodManagementPolicy:  apps.OrderedReadyPodManagement,
-					Selector:             &metav1.LabelSelector{MatchLabels: validLabels},
-					Template:             validPodTemplate.Template,
-					UpdateStrategy:       apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
-					VolumeClaimTemplates: []api.PersistentVolumeClaim{validPVCTemplate, validPVCTemplate2},
-				},
-			},
+			name:   "add new pvc template",
+			old:    mkStatefulSet(&validPodTemplate, tweakPVCTemplateSize([]api.PersistentVolumeClaim{validPVCTemplate})),
+			update: mkStatefulSet(&validPodTemplate, tweakPVCTemplateSize([]api.PersistentVolumeClaim{validPVCTemplate, validPVCTemplate2})),
 			errs: field.ErrorList{
 				field.Forbidden(field.NewPath("spec"), ""),
 			},
@@ -1219,21 +1019,19 @@ func TestValidateControllerRevision(t *testing.T) {
 		}
 	}
 
-	ss := apps.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-		Spec: apps.StatefulSetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
-			Template: api.PodTemplateSpec{
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"foo": "bar"},
-				},
+	podTemplate := api.PodTemplate{
+		Template: api.PodTemplateSpec{
+			Spec: api.PodSpec{
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{"a": "b"},
 			},
 		},
 	}
+
+	ss := mkStatefulSet(&podTemplate)
 
 	var (
 		valid       = newControllerRevision("validname", "validns", &ss, 0)
@@ -1284,36 +1082,20 @@ func TestValidateControllerRevisionUpdate(t *testing.T) {
 		}
 	}
 
-	ss := apps.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
-		Spec: apps.StatefulSetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
-			Template: api.PodTemplateSpec{
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"foo": "bar"},
-				},
+	podTemplate := api.PodTemplate{
+		Template: api.PodTemplateSpec{
+			Spec: api.PodSpec{
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{"a": "b"},
 			},
 		},
 	}
-	modifiedss := apps.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "cdf", Namespace: metav1.NamespaceDefault},
-		Spec: apps.StatefulSetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
-			Template: api.PodTemplateSpec{
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"foo": "bar"},
-				},
-			},
-		},
-	}
+
+	ss := mkStatefulSet(&podTemplate, tweakName("abc"))
+	modifiedss := mkStatefulSet(&podTemplate, tweakName("cdf"))
 
 	var (
 		valid           = newControllerRevision("1", "validname", "validns", &ss, 0)
